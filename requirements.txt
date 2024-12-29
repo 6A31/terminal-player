@@ -1,6 +1,6 @@
 Pillow
 opencv-python
-youtube_dl
+yt-dlp
 pytube
 youtube_transcript_api
 windows-curses

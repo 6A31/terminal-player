@@ -7,7 +7,7 @@ import math
 import curses
 import cv2
 from PIL import Image
-import youtube_dl
+import yt_dlp as youtube_dl
 import vlc
 from pytube import extract
 from youtube_transcript_api import YouTubeTranscriptApi
