@@ -3,6 +3,7 @@
 
 import sys
 import time
+import math
 import curses
 import cv2
 from PIL import Image
@@ -12,7 +13,7 @@ from pytube import extract
 from youtube_transcript_api import YouTubeTranscriptApi
 
 ################################################################################
-# ---------------------------- GLOBAL CONFIG ---------------------------------- #
+# Global Config & Flags
 ################################################################################
 
 ydl_opts = {
@@ -20,68 +21,99 @@ ydl_opts = {
     'outtmpl': 'YouTubeTemporary/video.%(ext)s',
 }
 
-# Flags
-YT = False               # True if using YouTube
-UseCachedFrames = False  # True if -c is specified
-Subtitles = False        # True if -sub is specified
+YT = False              # True if playing from YouTube
+UseCachedFrames = False # Skip extraction/resizing if -c
+Subtitles = False       # YouTube subtitles if -sub
 SubtitlesLang = None
 SubtitlesUseLang = False
-DisableDynamicSkip = False  # If True, don't skip frames to catch up
-DebugFPS = False           # If True, show live FPS in top-right corner
-PreviousCaptionsArrayIndex = 0
 
-chars = ["B", "S", "#", "&", "@", "$", "%", "*", "!", ".", " "]
+DisableDynamicSkip = False  # If True, don't skip frames to catch up
+DebugFPS = False            # If True, show FPS top-right
+ColorMode = False           # If True, use color approximation
+PreviousCaptionsArrayIndex = 0
 
 Video_FPS = None
 Video_Frames = None
 stdscr = None
+User_FPS = None
 
-User_FPS = None  # If provided by -f
+# ASCII grayscale map for shading (if not using color)
+chars_gray = ["B","S","#","&","@","$","%","*","!","."," "]
 
-# We'll define a color pair index for the green FPS text
-GREEN_PAIR_IDX = 1  # arbitrary "pair number" for curses
+# For color logic, we still want a "brightness-based" character, or you can choose block chars
+# We'll reuse the same grayscale map for the "character," but pick colors by (R,G,B).
+# If you prefer big blocks, you could do char = "█".
 
 ################################################################################
-# ----------------------------- ARG PARSING ----------------------------------- #
+# Basic Color Palette (8 color IDs) -> approximate (R,G,B)
+################################################################################
+
+# We'll define these as numeric IDs we can init for curses:
+C_COLOR_BLACK   = 1
+C_COLOR_RED     = 2
+C_COLOR_GREEN   = 3
+C_COLOR_YELLOW  = 4
+C_COLOR_BLUE    = 5
+C_COLOR_MAGENTA = 6
+C_COLOR_CYAN    = 7
+C_COLOR_WHITE   = 8
+
+COLOR_PALETTE = {
+    C_COLOR_BLACK:   (0,   0,   0),
+    C_COLOR_RED:     (255, 0,   0),
+    C_COLOR_GREEN:   (0,   255, 0),
+    C_COLOR_YELLOW:  (255, 255, 0),
+    C_COLOR_BLUE:    (0,   0,   255),
+    C_COLOR_MAGENTA: (255, 0,   255),
+    C_COLOR_CYAN:    (0,   255, 255),
+    C_COLOR_WHITE:   (255, 255, 255),
+}
+
+def closest_curses_color(r, g, b):
+    """
+    Return which of our 8 color IDs is closest to (r,g,b).
+    """
+    best_id = C_COLOR_BLACK
+    best_dist = float('inf')
+    for color_id, (cr, cg, cb) in COLOR_PALETTE.items():
+        dist = (r - cr)**2 + (g - cg)**2 + (b - cb)**2
+        if dist < best_dist:
+            best_dist = dist
+            best_id = color_id
+    return best_id
+
+################################################################################
+# CLI Parsing
 ################################################################################
 
 def print_help():
-    help_text = """
-Usage: ascii_player.py [options] <local_file> or -y <YouTubeLink>
+    help_text = f"""
+Usage: {sys.argv[0]} [options] <local_file> or -y <YouTubeLink>
 
 Options:
   -y <link>    Play a YouTube video (downloads it first).
-  -c           Use cached frames (skip extraction & resizing; 'resized/' must exist).
+  -c           Use cached frames (skip extraction & resizing).
   -sub [lang]  Enable YouTube subtitles; optional language code.
   -f <fps>     Set a custom ASCII framerate (displays fewer frames per second).
                Audio still plays at normal speed (frames are skipped).
   -noskip      Disable dynamic skipping. If the program falls behind schedule,
                it won't skip frames to catch up (video may get out of sync).
-  -debug       Show live FPS (number of frames drawn per second) in the top-right corner (in green).
+  -debug       Show live FPS (frames drawn per second) top-right.
+  -color       Enable color approximation (8-color ASCII).
   -h, -help    Show this help message and exit.
 
 Examples:
   # Local file, normal run
-  python ascii_player.py movie.mp4
+  python {sys.argv[0]} movie.mp4
 
-  # Local file, skip extraction/resizing (cached frames):
-  python ascii_player.py movie.mp4 -c
-
-  # YouTube, with default subtitles:
-  python ascii_player.py -y https://www.youtube.com/watch?v=XYZ -sub
-
-  # YouTube, with English subtitles, 10 FPS display:
-  python ascii_player.py -y https://www.youtube.com/watch?v=XYZ -sub en -f 10
-
-  # Local file, 15 FPS display, disable dynamic skipping, debug on:
-  python ascii_player.py movie.mp4 -f 15 -noskip -debug
+  # YouTube, with default subtitles, color, 10 FPS:
+  python {sys.argv[0]} -y https://www.youtube.com/watch?v=XYZ -sub -color -f 10
 """
     print(help_text)
 
-
 def parse_args(args):
     global YT, UseCachedFrames, Subtitles, SubtitlesLang, SubtitlesUseLang
-    global User_FPS, DisableDynamicSkip, DebugFPS
+    global User_FPS, DisableDynamicSkip, DebugFPS, ColorMode
 
     local_file = None
     youtube_link = None
@@ -89,31 +121,25 @@ def parse_args(args):
     idx = 0
     while idx < len(args):
         arg = args[idx]
-
         if arg in ('-h', '-help'):
             print_help()
             sys.exit(0)
-
         elif arg == '-y':
             YT = True
             idx += 1
             if idx < len(args):
                 youtube_link = args[idx]
                 idx += 1
-
         elif arg == '-c':
             UseCachedFrames = True
             idx += 1
-
         elif arg == '-sub':
             Subtitles = True
             idx += 1
-            # check if next arg is a language code
             if idx < len(args) and not args[idx].startswith('-'):
                 SubtitlesLang = args[idx]
                 SubtitlesUseLang = True
                 idx += 1
-
         elif arg == '-f':
             idx += 1
             if idx < len(args):
@@ -123,15 +149,15 @@ def parse_args(args):
                     print("Invalid -f argument.")
                     sys.exit(1)
                 idx += 1
-
         elif arg == '-noskip':
             DisableDynamicSkip = True
             idx += 1
-
         elif arg == '-debug':
             DebugFPS = True
             idx += 1
-
+        elif arg == '-color':
+            ColorMode = True
+            idx += 1
         else:
             # local file
             local_file = arg
@@ -140,7 +166,7 @@ def parse_args(args):
     return local_file, youtube_link
 
 ################################################################################
-# ----------------------------- VLC SETUP ------------------------------------- #
+# VLC Setup
 ################################################################################
 
 def get_vlc_player(path):
@@ -151,7 +177,7 @@ def get_vlc_player(path):
     return player
 
 ################################################################################
-# ----------------------------- MAIN ------------------------------------------ #
+# Main
 ################################################################################
 
 def main():
@@ -164,13 +190,11 @@ def main():
 
     local_file, youtube_link = parse_args(args)
 
-    # If not playing from YouTube, we can init curses right away
     if not YT:
         stdscr = curses.initscr()
         start_curses()
 
     try:
-        # If user didn't specify -c, we do extraction + resizing
         if not UseCachedFrames:
             total_frames = get_video_frames(local_file, youtube_link)
             if YT and Subtitles:
@@ -179,13 +203,12 @@ def main():
                 get_captions(youtube_link)
                 stdscr.addstr("Got captions\n")
                 stdscr.refresh()
+
             resize_images(total_frames)
         else:
-            # Skip extracting/resizing
             stdscr.addstr("Using cached frames in 'resized/' folder.\n")
             stdscr.refresh()
 
-            # We still want metadata for total_frames
             total_frames = get_video_metadata(local_file, youtube_link)
             if YT and Subtitles:
                 stdscr.addstr("Getting video captions\n")
@@ -194,7 +217,7 @@ def main():
                 stdscr.addstr("Got captions\n")
                 stdscr.refresh()
 
-        # Precompute ASCII from resized frames
+        # Precompute frames: either color or grayscale
         ascii_frames = precompute_ascii_frames(total_frames)
 
         # Setup audio
@@ -204,8 +227,6 @@ def main():
             audio_source = local_file
 
         player = get_vlc_player(audio_source)
-
-        # Draw frames
         draw_images(total_frames, ascii_frames, player)
 
     except KeyboardInterrupt:
@@ -218,16 +239,11 @@ def main():
     stop_curses()
 
 ################################################################################
-# --------------------- VIDEO METADATA (FOR -c MODE) ------------------------- #
+# Video Metadata (For -c mode)
 ################################################################################
 
 def get_video_metadata(local_file, youtube_link):
-    """
-    If skipping extraction/resizing, we still need Video_FPS and Video_Frames
-    so we know how many frames are expected.
-    """
     global Video_FPS, Video_Frames, stdscr
-
     if YT:
         path = "YouTubeTemporary/video.mp4"
     else:
@@ -243,12 +259,11 @@ def get_video_metadata(local_file, youtube_link):
     return Video_Frames
 
 ################################################################################
-# --------------------- EXTRACT FRAMES (IF NOT -c) --------------------------- #
+# Frame Extraction
 ################################################################################
 
 def get_video_frames(local_file, youtube_link):
     global stdscr, Video_FPS, Video_Frames
-
     if not YT:
         cap = cv2.VideoCapture(local_file)
     else:
@@ -289,7 +304,7 @@ def get_video_frames(local_file, youtube_link):
     return count
 
 ################################################################################
-# -------------------------- RESIZE IMAGES ------------------------------------ #
+# Resizing
 ################################################################################
 
 def resize_images(framesAmount):
@@ -302,6 +317,7 @@ def resize_images(framesAmount):
     for i in range(framesAmount):
         stdscr.move(y, x)
         resized_image = resize_image(i, y, x)
+        # Save result
         resized_image.save(f"resized/resized{i}.jpg")
 
         resize_bar.progress = i
@@ -319,143 +335,154 @@ def resize_image(index, y, x):
     new_width = max(1, term_width)
 
     im = Image.open(f"frames/frame{index}.jpg")
-    im = im.convert('L')
+    # If we are in color mode, convert to RGB, else grayscale
+    if ColorMode:
+        im = im.convert('RGB')
+    else:
+        im = im.convert('L')
+
     im = im.resize((new_width, new_height))
     return im
 
 ################################################################################
-# ---------------------- PRECOMPUTE ASCII OFFLINE ---------------------------- #
+# Precompute ASCII frames (with or without color)
 ################################################################################
 
 def precompute_ascii_frames(framesAmount):
-    stdscr.addstr("Precomputing ASCII for all frames...\n")
+    stdscr.addstr("Precomputing ASCII frames...\n")
     stdscr.refresh()
 
     term_height, term_width = stdscr.getmaxyx()
     precomputed = []
 
-    precompute_bar = LoadingBar(framesAmount, barLength=term_width - 2)
+    bar = LoadingBar(framesAmount, barLength=term_width - 2)
     y, x = stdscr.getyx()
 
     for i in range(framesAmount):
         stdscr.move(y, x)
         stdscr.addstr(f"Converting frame {i}/{framesAmount-1}\n")
 
-        path = f"resized/resized{i}.jpg"
-        img = Image.open(path)
+        img_path = f"resized/resized{i}.jpg"
+        img = Image.open(img_path)
         pixels = img.load()
 
-        ascii_lines = []
+        frame_data = []
         for row in range(img.height):
-            row_chars = []
+            row_data = []
             for col in range(img.width):
-                val = pixels[col, row]
-                idx_char = val // 25
-                row_chars.append(chars[int(idx_char)])
-            ascii_lines.append("".join(row_chars))
+                if ColorMode:
+                    r, g, b = pixels[col, row]
+                    # 1) pick ASCII char based on brightness
+                    brightness = (r + g + b) / 3
+                    char_idx = int(brightness // 25)  # 0..10
+                    ascii_char = chars_gray[char_idx]
 
-        precomputed.append(ascii_lines)
+                    # 2) find color ID from 8-color palette
+                    color_id = closest_curses_color(r, g, b)
+                    # Store (char, color_id)
+                    row_data.append((ascii_char, color_id))
+                else:
+                    # grayscale
+                    val = pixels[col, row]
+                    char_idx = int(val // 25)  # 0..10
+                    ascii_char = chars_gray[char_idx]
+                    # Store just char (colorless)
+                    row_data.append(ascii_char)
+            frame_data.append(row_data)
 
-        precompute_bar.progress = i
-        stdscr.addstr(precompute_bar.display() + "\n")
+        precomputed.append(frame_data)
+
+        bar.progress = i
+        stdscr.addstr(bar.display() + "\n")
         stdscr.refresh()
 
-    stdscr.addstr("Finished precomputing ASCII.\n")
+    stdscr.addstr("Finished precomputing.\n")
     stdscr.refresh()
     return precomputed
 
 ################################################################################
-# -------------------------- DRAW IMAGES / PLAYBACK --------------------------- #
+# Drawing / Playback
 ################################################################################
 
 def draw_images(framesAmount, ascii_frames, player):
-    """
-    Main playback loop:
-      - Uses a skip-factor if user_fps < video_fps to avoid slow-motion
-        (we skip frames so total playback time ~ real audio length).
-      - Optionally does dynamic skipping (unless disabled by -noskip).
-      - If -debug is set, show real-time FPS in the top-right corner in GREEN.
-    """
     stdscr.addstr("Press any key to start drawing\n")
     stdscr.refresh()
     stdscr.getch()
 
-    # Start audio
     player.play()
 
-    # Determine final display FPS
     effective_fps = User_FPS if User_FPS else Video_FPS
     if effective_fps <= 0:
-        effective_fps = Video_FPS  # fallback
+        effective_fps = Video_FPS
 
-    # Compute skip_factor so total play time = frames / video_fps
+    # skip_factor if user_fps < video_fps
     skip_factor = max(1, int(round(Video_FPS / effective_fps)))
 
-    # Time-based scheduling for dynamic skipping
     start_time = time.time()
-    skip_threshold = 0.05  # 50 ms behind => skip to catch up
+    skip_threshold = 0.05  # 50ms behind => skip
 
-    # For debug FPS
     last_fps_time = time.time()
     frames_in_second = 0
     displayed_fps = 0.0
 
     frame_idx = 0
     while frame_idx < framesAmount:
-        t_ideal = (frame_idx / Video_FPS)
+        t_ideal = frame_idx / Video_FPS
         now = time.time() - start_time
 
-        # If dynamic skipping is enabled and we are behind schedule, skip
         if not DisableDynamicSkip:
-            if now > (t_ideal + skip_threshold):
+            if now > t_ideal + skip_threshold:
                 frame_idx += skip_factor
                 continue
 
-        # If we're a bit early, sleep
         if now < t_ideal:
             time.sleep(t_ideal - now)
 
-        # Actually draw the frame
-        ascii_lines = ascii_frames[frame_idx]
-        for row_idx, line_text in enumerate(ascii_lines):
-            stdscr.move(row_idx, 0)
-            stdscr.addstr(line_text)
+        # Draw the frame
+        # ascii_frames[frame_idx] is a list of rows
+        # row_data is either a list of chars or a list of (char, color_id) if ColorMode
+        frame_data = ascii_frames[frame_idx]
+        for row_idx, row_data in enumerate(frame_data):
+            for col_idx, px_data in enumerate(row_data):
+                if ColorMode:
+                    (char, color_id) = px_data
+                    stdscr.addstr(row_idx, col_idx, char, curses.color_pair(color_id))
+                else:
+                    # grayscale
+                    stdscr.addstr(row_idx, col_idx, px_data)
 
-        # Subtitles, if YT
         if YT and Subtitles:
             get_caption_at_frame(frame_idx)
 
-        # If debug is on, compute live FPS
+        # Debug FPS
         frames_in_second += 1
         current_time = time.time()
-        if (current_time - last_fps_time) >= 1.0:
+        if current_time - last_fps_time >= 1.0:
             displayed_fps = frames_in_second / (current_time - last_fps_time)
             frames_in_second = 0
             last_fps_time = current_time
 
-        # If debug is on, show in the top-right corner in GREEN
         if DebugFPS:
             s = f"FPS:{displayed_fps:.2f}"
             max_y, max_x = stdscr.getmaxyx()
             debug_col = max_x - len(s) - 1
-            # Use color pair (GREEN_PAIR_IDX) for green text
-            stdscr.addstr(0, debug_col, s, curses.color_pair(GREEN_PAIR_IDX))
+            # Let's color it green. You could define a custom color pair if you want.
+            # We'll just do curses.COLOR_GREEN on black for demonstration if available.
+            # If we haven't init a special pair for green, let's do color 2 => red? Actually let's do color 3 => green
+            # Or we can re-use the color_id approach from above. We'll do a simpler approach:
+            stdscr.addstr(0, debug_col, s, curses.color_pair(C_COLOR_GREEN))
 
         stdscr.refresh()
-
-        # Move to next "displayed" frame by skip_factor
         frame_idx += skip_factor
 
-    # Stop audio
     player.stop()
 
 ################################################################################
-# ------------------------- CAPTIONS FOR YOUTUBE ----------------------------- #
+# Captions
 ################################################################################
 
 def get_captions(youtube_link):
-    global CaptionsArray, SubtitlesUseLang, SubtitlesLang
-
+    global CaptionsArray
     video_id = extract.video_id(youtube_link)
     if not SubtitlesUseLang:
         CaptionsArray = YouTubeTranscriptApi.get_transcript(video_id)
@@ -463,7 +490,7 @@ def get_captions(youtube_link):
         CaptionsArray = YouTubeTranscriptApi.get_transcript(video_id, languages=[SubtitlesLang])
 
 def get_caption_at_frame(frame_idx):
-    # Clear the subtitle line
+    # Clear last line
     for col in range(stdscr.getmaxyx()[1]):
         stdscr.addstr(stdscr.getmaxyx()[0] - 1, col, " ")
 
@@ -484,12 +511,12 @@ def get_caption_at_frame(frame_idx):
     if not found_new_caption:
         text = CaptionsArray[PreviousCaptionsArrayIndex]["text"]
 
-    cap_row = stdscr.getmaxyx()[0] - 1
-    cap_col = int(stdscr.getmaxyx()[1] / 2 - len(text) / 2)
-    stdscr.addstr(cap_row, cap_col, text)
+    row = stdscr.getmaxyx()[0] - 1
+    col = int(stdscr.getmaxyx()[1] / 2 - len(text) / 2)
+    stdscr.addstr(row, col, text)
 
 ################################################################################
-# ----------------------------- CURSES ---------------------------------------- #
+# Curses Setup & Teardown
 ################################################################################
 
 def start_curses():
@@ -497,8 +524,17 @@ def start_curses():
     curses.noecho()
     curses.cbreak()
     curses.start_color()
-    # Initialize a green color pair for debug text
-    curses.init_pair(GREEN_PAIR_IDX, curses.COLOR_GREEN, curses.COLOR_BLACK)
+    curses.use_default_colors()
+
+    # Initialize the 8 color pairs
+    curses.init_pair(C_COLOR_BLACK,   curses.COLOR_BLACK,   -1)
+    curses.init_pair(C_COLOR_RED,     curses.COLOR_RED,     -1)
+    curses.init_pair(C_COLOR_GREEN,   curses.COLOR_GREEN,   -1)
+    curses.init_pair(C_COLOR_YELLOW,  curses.COLOR_YELLOW,  -1)
+    curses.init_pair(C_COLOR_BLUE,    curses.COLOR_BLUE,    -1)
+    curses.init_pair(C_COLOR_MAGENTA, curses.COLOR_MAGENTA, -1)
+    curses.init_pair(C_COLOR_CYAN,    curses.COLOR_CYAN,    -1)
+    curses.init_pair(C_COLOR_WHITE,   curses.COLOR_WHITE,   -1)
 
 def stop_curses():
     curses.curs_set(1)
@@ -510,11 +546,10 @@ def stop_audio_and_curses():
         stop_curses()
     except:
         pass
-    # Stop any active VLC instance
     vlc.Instance().media_player_new().stop()
 
 ################################################################################
-# ----------------------------- LOADING BAR ----------------------------------- #
+# LoadingBar
 ################################################################################
 
 class LoadingBar:
@@ -538,7 +573,7 @@ class LoadingBar:
         return toPrint
 
 ################################################################################
-# ----------------------------- ENTRY POINT ----------------------------------- #
+# Entry Point
 ################################################################################
 
 if __name__ == "__main__":
