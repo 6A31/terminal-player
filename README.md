@@ -1,111 +1,105 @@
-```markdown
-# ASCII Video Player
+# ASCII Video Player (256-Color Edition)
 
-This is a Python script that converts and displays video (local file or YouTube) in your terminal using ASCII characters. It supports optional color mode, subtitles (YouTube only), and adjustable framerates. Audio is played using [VLC](https://www.videolan.org/vlc/) via `python-vlc`.
+This Python script converts any local or YouTube-based video into ASCII art rendered in your terminal. It supports **256-color** mode for richer color approximation.
 
 ## Features
 
-- **Local File or YouTube**: Provide a local video file (`.mp4` etc.) or a YouTube link (downloads it locally).
-- **ASCII Rendering**: Converts each frame to ASCII art, displayed in the terminal via `curses`.
-- **Color Mode**: Approximate 8-color mode if your terminal supports colors.
-- **Subtitles (YouTube only)**: Optionally fetch subtitles, with optional language code.
-- **Adjustable FPS**: Reduce the ASCII framerate (audio still plays at normal speed).
-- **Cached Frames**: Optionally skip extraction/resizing (faster subsequent runs).
-- **Dynamic Skipping**: Skip frames if playback falls behind real-time (can be disabled).
-- **Loading Indicators**: Displays a loading bar for frame extraction and resizing.
-- **Debug Mode**: Display live FPS in the top-right corner.
+- **Local or YouTube Videos**: Provide a local file or use `-y <URL>` to download and play from YouTube.  
+- **Full Terminal Playback**: Streams frames as ASCII art in your terminal while playing audio via VLC.  
+- **256-Color Mode**: Dynamically approximates each pixel to an xterm-256 color for a richer viewing experience.  
+- **Subtitles**: Optionally display YouTube subtitles (`-sub`) if available.  
+- **Frame Skipping**: Automatically skips frames to keep video and audio in sync if your system falls behind.
 
 ## Requirements
 
-- Python 3.x
-- [pip](https://pip.pypa.io/en/stable/) for installing dependencies
-- A terminal that supports [curses](https://docs.python.org/3/library/curses.html)
-- [VLC](https://www.videolan.org/vlc/) installed on your system for audio playback
+- **Python 3.7+** (tested on 3.9, 3.10, etc.)  
+- **curses** (comes pre-installed on most Linux/Unix-like systems; for Windows, WSL is recommended)  
+- **OpenCV** (`pip install opencv-python`)  
+- **Pillow** (`pip install Pillow`)  
+- **VLC Python bindings** (`pip install python-vlc`)  
+- **YouTube-DL** (`pip install youtube-dl`)  
+- **pytube** & **youtube_transcript_api** (`pip install pytube youtube-transcript-api`)
 
-## Python Dependencies
+You’ll need **VLC** installed on your system so that `python-vlc` can call its libraries for audio playback.
 
-Install the required Python libraries:
+## Installation
 
-```bash
-pip install opencv-python Pillow python-vlc youtube_dl pytube youtube_transcript_api
-```
-
-(Note: For `pytube`, you might also run `pip install pytube` separately if needed.)
+1. **Clone or Download** this repository.  
+2. **Install Dependencies** using pip:
+   ```
+   pip install -r requirements.txt
+   ```
+   Or individually:
+   ```
+   pip install opencv-python Pillow python-vlc youtube_dl pytube youtube_transcript_api
+   ```
+3. **Ensure 256-Color Support**:  
+   - On Linux, macOS, or WSL:  
+     ```
+     export TERM=xterm-256color
+     ```
+   - On Windows Terminal (via WSL), confirm by running:
+     ```
+     echo $TERM
+     ```
+     It should print `xterm-256color`.
 
 ## Usage
 
-```bash
-python ascii_video_player.py [options] <local_file> or -y <YouTubeLink>
+```
+python ascii_video_player.py [options] <local_file>
+OR
+python ascii_video_player.py [options] -y <YouTubeURL>
 ```
 
 ### Options
 
-- **`-y <link>`**: Play a YouTube video (downloads it first).
-- **`-c`**: Use cached frames (skip extraction & resizing).
-- **`-sub [lang]`**: Enable YouTube subtitles; optionally specify a [language code](https://support.google.com/youtube/answer/6140493).
-- **`-f <fps>`**: Set a custom ASCII framerate (displays fewer frames per second). Audio still plays at normal speed (frames are skipped).
-- **`-noskip`**: Disable dynamic skipping. If the program falls behind schedule, it won't skip frames (video may become out of sync with audio).
-- **`-debug`**: Show live FPS (frames drawn per second) in the top-right of the terminal.
-- **`-color`**: Enable color approximation (8-color ASCII).
-- **`-h, -help`**: Display help and usage information, then exit.
+- **`-y <link>`**  
+  Download and play a YouTube video (requires `youtube_dl` and `pytube`).  
+- **`-c`**  
+  Use cached frames (skip extraction & resizing). Assumes you already have `frames/` and `resized/` folders populated.  
+- **`-sub [lang]`**  
+  Display YouTube subtitles (default or specified language).  
+- **`-f <fps>`**  
+  Limit ASCII rendering to `<fps>` frames per second, skipping frames as needed to keep in sync with audio.  
+- **`-noskip`**  
+  Don’t skip frames, even if we fall behind. The video may go out of sync with audio.  
+- **`-debug`**  
+  Show real-time FPS in the top-right corner of the terminal.  
+- **`-color`**  
+  Enable 256-color approximation. Without this flag, it defaults to grayscale.  
+- **`-h` or `-help`**  
+  Show usage info.
 
 ### Examples
 
-1. **Local file, normal run:**
-    ```bash
-    python ascii_video_player.py movie.mp4
-    ```
-2. **YouTube, with default subtitles, color, 10 FPS:**
-    ```bash
-    python ascii_video_player.py -y https://www.youtube.com/watch?v=XYZ -sub -color -f 10
-    ```
+1. **Play a local file with color**:
+   ```
+   python ascii_video_player.py -color myvideo.mp4
+   ```
+2. **Download and play a YouTube link, 10 FPS, with subtitles**:
+   ```
+   python ascii_video_player.py -y https://www.youtube.com/watch?v=XYZ -sub en -color -f 10
+   ```
 
-## How It Works
+## Performance Tips
 
-1. **Frame Extraction**  
-   - The script uses `OpenCV` (`cv2`) to read each frame of the video.  
-   - Frames are saved as `frame0.jpg`, `frame1.jpg`, etc., in a `frames/` directory.
-
-2. **Frame Resizing**  
-   - Each frame is resized to match your terminal’s dimensions so it can be displayed neatly.  
-   - Resized frames are saved in a `resized/` directory.
-
-3. **ASCII Conversion**  
-   - If **color** is disabled, each pixel's brightness is mapped to a character in the grayscale set.  
-   - If **color** is **enabled**, the script picks both a character (based on brightness) and a color pair (one of 8 basic colors) that best approximates the original pixel.
-
-4. **Playback**  
-   - The script uses the `curses` library to draw the frames in the terminal.  
-   - Audio playback is handled by **VLC**.  
-   - The default framerate is the video’s native FPS, but you can adjust it with `-f <fps>`.  
-   - **Dynamic Skipping** is on by default to stay in sync with the audio (disable with `-noskip`).
-
-5. **YouTube Support**  
-   - If `-y <link>` is used, the script uses [youtube_dl](https://github.com/ytdl-org/youtube-dl) to download the video in `.mp4` format.  
-   - Subtitles are fetched via `youtube_transcript_api` if `-sub` is specified.
-
-## Directories
-
-- **`frames/`**: Temporary folder containing raw frames from the original video (extracted by OpenCV).  
-- **`resized/`**: Temporary folder containing frames resized to your terminal’s width/height.
-
-## Known Limitations
-
-- **Terminal Size**: If you resize the terminal while the script is running, it won’t automatically adjust. Restart the script to adapt to the new terminal size.
-- **Performance**: Large videos or high FPS can be CPU-intensive. Lower the FPS with `-f <fps>` if your machine struggles.
-- **Subtitle Timing**: Subtitles are matched against approximate frame times. Some edge cases might not align perfectly.
+1. **Reduce Terminal Size**  
+   A smaller width/height means fewer characters to draw, which can drastically improve speed.  
+2. **Lower FPS**  
+   Use `-f 10` or even `-f 5` to reduce how many frames get converted/drawn per second.  
+3. **Skip Frames**  
+   By default, if the script falls behind, it will skip frames to catch up (unless you use `-noskip`).  
+4. **Disable 256-Color**  
+   Color approximation is CPU-intensive, so if performance is too slow, omit `-color` to fall back to grayscale.  
+5. **Efficient Environment**  
+   Running under WSL2 on a modern CPU typically handles things better than older hardware or non-optimized environments.
 
 ## Contributing
 
-Feel free to open issues or pull requests if you have fixes or improvements.
+Pull requests are NOT welcome. For major changes, please open an issue first to discuss potential modifications.
 
-## License
-
-This project is provided under the [MIT License](https://opensource.org/licenses/MIT).  
-You are free to use, modify, and distribute this software as permitted.
 
 ---
 
-**Enjoy ASCII playback!**  
-If you find this project helpful or fun, a star on GitHub is appreciated. 
-```
+**Note:** 256-color ASCII rendering can be quite CPU-heavy, especially for higher-resolution videos or large terminal sizes. Adjust the above parameters to achieve smoother playback.

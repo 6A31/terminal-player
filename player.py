@@ -37,50 +37,57 @@ Video_Frames = None
 stdscr = None
 User_FPS = None
 
-# ASCII grayscale map for shading (if not using color)
+# ASCII grayscale map for shading
 chars_gray = ["B","S","#","&","@","$","%","*","!","."," "]
 
-# For color logic, we still want a "brightness-based" character, or you can choose block chars
-# We'll reuse the same grayscale map for the "character," but pick colors by (R,G,B).
-# If you prefer big blocks, you could do char = "█".
-
 ################################################################################
-# Basic Color Palette (8 color IDs) -> approximate (R,G,B)
+# 256-Color Support
 ################################################################################
+# We’ll maintain a cache of color-pairs so we don’t re-create them for every pixel.
+# For xterm-256color, valid color indices range from 0..255. 
+# curses.init_pair can only create so many pairs, but usually 256 is supported.
 
-# We'll define these as numeric IDs we can init for curses:
-C_COLOR_BLACK   = 1
-C_COLOR_RED     = 2
-C_COLOR_GREEN   = 3
-C_COLOR_YELLOW  = 4
-C_COLOR_BLUE    = 5
-C_COLOR_MAGENTA = 6
-C_COLOR_CYAN    = 7
-C_COLOR_WHITE   = 8
+COLOR_PAIR_CACHE = {}
+NEXT_COLOR_PAIR_ID = 1  # We'll assign incremental pair IDs as we discover new colors.
 
-COLOR_PALETTE = {
-    C_COLOR_BLACK:   (0,   0,   0),
-    C_COLOR_RED:     (255, 0,   0),
-    C_COLOR_GREEN:   (0,   255, 0),
-    C_COLOR_YELLOW:  (255, 255, 0),
-    C_COLOR_BLUE:    (0,   0,   255),
-    C_COLOR_MAGENTA: (255, 0,   255),
-    C_COLOR_CYAN:    (0,   255, 255),
-    C_COLOR_WHITE:   (255, 255, 255),
-}
-
-def closest_curses_color(r, g, b):
+def xterm_256_index(r, g, b):
     """
-    Return which of our 8 color IDs is closest to (r,g,b).
+    Convert (r,g,b) -> xterm-256 index.
+    
+    - Indices 16..231 form a 6x6x6 color cube.
+    - Indices 232..255 are 24 grayscale values from black to white.
     """
-    best_id = C_COLOR_BLACK
-    best_dist = float('inf')
-    for color_id, (cr, cg, cb) in COLOR_PALETTE.items():
-        dist = (r - cr)**2 + (g - cg)**2 + (b - cb)**2
-        if dist < best_dist:
-            best_dist = dist
-            best_id = color_id
-    return best_id
+    # If r==g==b, check if grayscale is closer:
+    if r == g == b:
+        # We can map [0..255] to 24 steps (232..255)
+        gray_level = r  # same as g, b
+        gray_index = int(round(gray_level / 255.0 * 23))  # 0..23
+        return 232 + gray_index
+
+    # Otherwise, approximate in the 6x6x6 cube
+    R = int(round(r / 255.0 * 5))  # 0..5
+    G = int(round(g / 255.0 * 5))  # 0..5
+    B = int(round(b / 255.0 * 5))  # 0..5
+    return 16 + (36 * R) + (6 * G) + B
+
+def get_color_pair(r, g, b):
+    """
+    Return a curses color pair ID that approximates (r,g,b) in xterm-256.
+    Creates a new color pair if needed.
+    """
+    global NEXT_COLOR_PAIR_ID
+
+    color_idx = xterm_256_index(r, g, b)
+    if color_idx in COLOR_PAIR_CACHE:
+        return COLOR_PAIR_CACHE[color_idx]
+
+    pair_id = NEXT_COLOR_PAIR_ID
+    # Initialize the pair: pair_id => (foreground = color_idx, background = -1)
+    curses.init_pair(pair_id, color_idx, -1)
+
+    COLOR_PAIR_CACHE[color_idx] = pair_id
+    NEXT_COLOR_PAIR_ID += 1
+    return pair_id
 
 ################################################################################
 # CLI Parsing
@@ -96,18 +103,14 @@ Options:
   -sub [lang]  Enable YouTube subtitles; optional language code.
   -f <fps>     Set a custom ASCII framerate (displays fewer frames per second).
                Audio still plays at normal speed (frames are skipped).
-  -noskip      Disable dynamic skipping. If the program falls behind schedule,
-               it won't skip frames to catch up (video may get out of sync).
+  -noskip      Disable dynamic skipping. If we fall behind, we won't skip frames.
   -debug       Show live FPS (frames drawn per second) top-right.
-  -color       Enable color approximation (8-color ASCII).
+  -color       Enable 256-color approximation (ASCII).
   -h, -help    Show this help message and exit.
 
 Examples:
-  # Local file, normal run
   python {sys.argv[0]} movie.mp4
-
-  # YouTube, with default subtitles, color, 10 FPS:
-  python {sys.argv[0]} -y https://www.youtube.com/watch?v=XYZ -sub -color -f 10
+  python {sys.argv[0]} -y https://www.youtube.com/watch?v=XYZ -sub en -color -f 10
 """
     print(help_text)
 
@@ -190,6 +193,7 @@ def main():
 
     local_file, youtube_link = parse_args(args)
 
+    # For local_file usage in non-YT mode, we start curses now.
     if not YT:
         stdscr = curses.initscr()
         start_curses()
@@ -264,6 +268,7 @@ def get_video_metadata(local_file, youtube_link):
 
 def get_video_frames(local_file, youtube_link):
     global stdscr, Video_FPS, Video_Frames
+
     if not YT:
         cap = cv2.VideoCapture(local_file)
     else:
@@ -271,6 +276,7 @@ def get_video_frames(local_file, youtube_link):
             ydl.download([youtube_link])
             cap = cv2.VideoCapture("YouTubeTemporary/video.mp4")
 
+        # For YouTube, now init curses after we’ve downloaded
         stdscr = curses.initscr()
         start_curses()
 
@@ -298,8 +304,7 @@ def get_video_frames(local_file, youtube_link):
 
     cap.release()
 
-    stdscr.addch("\n")
-    stdscr.addstr("Finished loading frames\n")
+    stdscr.addstr("\nFinished loading frames\n")
     stdscr.refresh()
     return count
 
@@ -317,7 +322,6 @@ def resize_images(framesAmount):
     for i in range(framesAmount):
         stdscr.move(y, x)
         resized_image = resize_image(i, y, x)
-        # Save result
         resized_image.save(f"resized/resized{i}.jpg")
 
         resize_bar.progress = i
@@ -331,11 +335,11 @@ def resize_image(index, y, x):
     stdscr.refresh()
 
     term_height, term_width = stdscr.getmaxyx()
+    # We subtract at least 1 row for any debug info. 
     new_height = max(1, term_height - 1)
     new_width = max(1, term_width)
 
     im = Image.open(f"frames/frame{index}.jpg")
-    # If we are in color mode, convert to RGB, else grayscale
     if ColorMode:
         im = im.convert('RGB')
     else:
@@ -345,7 +349,7 @@ def resize_image(index, y, x):
     return im
 
 ################################################################################
-# Precompute ASCII frames (with or without color)
+# Precompute ASCII frames (with or without 256-color)
 ################################################################################
 
 def precompute_ascii_frames(framesAmount):
@@ -372,21 +376,18 @@ def precompute_ascii_frames(framesAmount):
             for col in range(img.width):
                 if ColorMode:
                     r, g, b = pixels[col, row]
-                    # 1) pick ASCII char based on brightness
+                    # 1) ASCII char based on brightness
                     brightness = (r + g + b) / 3
                     char_idx = int(brightness // 25)  # 0..10
                     ascii_char = chars_gray[char_idx]
 
-                    # 2) find color ID from 8-color palette
-                    color_id = closest_curses_color(r, g, b)
-                    # Store (char, color_id)
-                    row_data.append((ascii_char, color_id))
+                    # 2) Get the 256-color pair
+                    color_pair_id = get_color_pair(r, g, b)
+                    row_data.append((ascii_char, color_pair_id))
                 else:
-                    # grayscale
                     val = pixels[col, row]
                     char_idx = int(val // 25)  # 0..10
                     ascii_char = chars_gray[char_idx]
-                    # Store just char (colorless)
                     row_data.append(ascii_char)
             frame_data.append(row_data)
 
@@ -439,16 +440,13 @@ def draw_images(framesAmount, ascii_frames, player):
             time.sleep(t_ideal - now)
 
         # Draw the frame
-        # ascii_frames[frame_idx] is a list of rows
-        # row_data is either a list of chars or a list of (char, color_id) if ColorMode
         frame_data = ascii_frames[frame_idx]
         for row_idx, row_data in enumerate(frame_data):
             for col_idx, px_data in enumerate(row_data):
                 if ColorMode:
-                    (char, color_id) = px_data
-                    stdscr.addstr(row_idx, col_idx, char, curses.color_pair(color_id))
+                    (char, color_pair_id) = px_data
+                    stdscr.addstr(row_idx, col_idx, char, curses.color_pair(color_pair_id))
                 else:
-                    # grayscale
                     stdscr.addstr(row_idx, col_idx, px_data)
 
         if YT and Subtitles:
@@ -466,11 +464,9 @@ def draw_images(framesAmount, ascii_frames, player):
             s = f"FPS:{displayed_fps:.2f}"
             max_y, max_x = stdscr.getmaxyx()
             debug_col = max_x - len(s) - 1
-            # Let's color it green. You could define a custom color pair if you want.
-            # We'll just do curses.COLOR_GREEN on black for demonstration if available.
-            # If we haven't init a special pair for green, let's do color 2 => red? Actually let's do color 3 => green
-            # Or we can re-use the color_id approach from above. We'll do a simpler approach:
-            stdscr.addstr(0, debug_col, s, curses.color_pair(C_COLOR_GREEN))
+            # Show debug text in, say, green. (0,255,0)
+            debug_pair = get_color_pair(0, 255, 0)
+            stdscr.addstr(0, debug_col, s, curses.color_pair(debug_pair))
 
         stdscr.refresh()
         frame_idx += skip_factor
@@ -496,7 +492,7 @@ def get_caption_at_frame(frame_idx):
 
     time_needed = frame_idx / Video_FPS
     global PreviousCaptionsArrayIndex
-    time_passed = CaptionsArray[0]["start"]
+    time_passed = CaptionsArray[0]["start"]  # just for reference
 
     text = ""
     found_new_caption = False
@@ -512,7 +508,7 @@ def get_caption_at_frame(frame_idx):
         text = CaptionsArray[PreviousCaptionsArrayIndex]["text"]
 
     row = stdscr.getmaxyx()[0] - 1
-    col = int(stdscr.getmaxyx()[1] / 2 - len(text) / 2)
+    col = max(0, int(stdscr.getmaxyx()[1] / 2 - len(text) / 2))
     stdscr.addstr(row, col, text)
 
 ################################################################################
@@ -523,18 +519,11 @@ def start_curses():
     curses.curs_set(0)
     curses.noecho()
     curses.cbreak()
+    # Very important: enable color and assume 256-color mode if terminal supports it.
     curses.start_color()
     curses.use_default_colors()
-
-    # Initialize the 8 color pairs
-    curses.init_pair(C_COLOR_BLACK,   curses.COLOR_BLACK,   -1)
-    curses.init_pair(C_COLOR_RED,     curses.COLOR_RED,     -1)
-    curses.init_pair(C_COLOR_GREEN,   curses.COLOR_GREEN,   -1)
-    curses.init_pair(C_COLOR_YELLOW,  curses.COLOR_YELLOW,  -1)
-    curses.init_pair(C_COLOR_BLUE,    curses.COLOR_BLUE,    -1)
-    curses.init_pair(C_COLOR_MAGENTA, curses.COLOR_MAGENTA, -1)
-    curses.init_pair(C_COLOR_CYAN,    curses.COLOR_CYAN,    -1)
-    curses.init_pair(C_COLOR_WHITE,   curses.COLOR_WHITE,   -1)
+    # If your environment variable $TERM is set to xterm-256color, Python curses 
+    # should allow init_color() for 256 colors.
 
 def stop_curses():
     curses.curs_set(1)
