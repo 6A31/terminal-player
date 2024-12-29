@@ -4,3 +4,4 @@ Videos/*
 frames/*.jpg
 resized/*.jpg
 __pycache__
+venv/
