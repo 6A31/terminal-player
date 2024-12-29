@@ -1,6 +1,8 @@
 *.mp4
 Videos/*
 .idea
+frames/*.png
+resized/*.png
 frames/*.jpg
 resized/*.jpg
 __pycache__

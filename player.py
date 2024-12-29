@@ -21,15 +21,16 @@ ydl_opts = {
     'outtmpl': 'YouTubeTemporary/video.%(ext)s',
 }
 
-YT = False              # True if playing from YouTube
-UseCachedFrames = False # Skip extraction/resizing if -c
-Subtitles = False       # YouTube subtitles if -sub
+YT = False               # True if playing from YouTube
+UseCachedFrames = False  # If True, skip extraction/resizing (must have existing resized/*.png)
+WriteFrames = False      # If True, store frames to disk as .png (lossless)
+Subtitles = False        # YouTube subtitles if -sub
 SubtitlesLang = None
 SubtitlesUseLang = False
 
-DisableDynamicSkip = False  # If True, don't skip frames to catch up
-DebugFPS = False            # If True, show FPS top-right
-ColorMode = False           # If True, use color approximation
+DisableDynamicSkip = False
+DebugFPS = False
+ColorMode = False           # If True, each pixel is a colored block
 PreviousCaptionsArrayIndex = 0
 
 Video_FPS = None
@@ -37,55 +38,42 @@ Video_Frames = None
 stdscr = None
 User_FPS = None
 
-# ASCII grayscale map for shading
+# ASCII grayscale map for shading (if ColorMode=False)
 chars_gray = ["B","S","#","&","@","$","%","*","!","."," "]
 
 ################################################################################
 # 256-Color Support
 ################################################################################
-# We’ll maintain a cache of color-pairs so we don’t re-create them for every pixel.
-# For xterm-256color, valid color indices range from 0..255. 
-# curses.init_pair can only create so many pairs, but usually 256 is supported.
 
 COLOR_PAIR_CACHE = {}
-NEXT_COLOR_PAIR_ID = 1  # We'll assign incremental pair IDs as we discover new colors.
+NEXT_COLOR_PAIR_ID = 1
 
 def xterm_256_index(r, g, b):
     """
     Convert (r,g,b) -> xterm-256 index.
-    
-    - Indices 16..231 form a 6x6x6 color cube.
-    - Indices 232..255 are 24 grayscale values from black to white.
+    Indices 16..231 form a 6x6x6 color cube;
+    Indices 232..255 are a 24-step grayscale ramp.
     """
-    # If r==g==b, check if grayscale is closer:
     if r == g == b:
-        # We can map [0..255] to 24 steps (232..255)
-        gray_level = r  # same as g, b
-        gray_index = int(round(gray_level / 255.0 * 23))  # 0..23
+        gray_level = r
+        gray_index = int(round(gray_level / 255.0 * 23))
         return 232 + gray_index
 
-    # Otherwise, approximate in the 6x6x6 cube
-    R = int(round(r / 255.0 * 5))  # 0..5
-    G = int(round(g / 255.0 * 5))  # 0..5
-    B = int(round(b / 255.0 * 5))  # 0..5
+    R = int(round(r / 255.0 * 5))
+    G = int(round(g / 255.0 * 5))
+    B = int(round(b / 255.0 * 5))
     return 16 + (36 * R) + (6 * G) + B
 
-def get_color_pair(r, g, b):
-    """
-    Return a curses color pair ID that approximates (r,g,b) in xterm-256.
-    Creates a new color pair if needed.
-    """
+def get_color_pair(fg_idx, bg_idx):
     global NEXT_COLOR_PAIR_ID
 
-    color_idx = xterm_256_index(r, g, b)
-    if color_idx in COLOR_PAIR_CACHE:
-        return COLOR_PAIR_CACHE[color_idx]
+    key = (fg_idx, bg_idx)
+    if key in COLOR_PAIR_CACHE:
+        return COLOR_PAIR_CACHE[key]
 
     pair_id = NEXT_COLOR_PAIR_ID
-    # Initialize the pair: pair_id => (foreground = color_idx, background = -1)
-    curses.init_pair(pair_id, color_idx, -1)
-
-    COLOR_PAIR_CACHE[color_idx] = pair_id
+    curses.init_pair(pair_id, fg_idx, bg_idx)
+    COLOR_PAIR_CACHE[key] = pair_id
     NEXT_COLOR_PAIR_ID += 1
     return pair_id
 
@@ -99,23 +87,30 @@ Usage: {sys.argv[0]} [options] <local_file> or -y <YouTubeLink>
 
 Options:
   -y <link>    Play a YouTube video (downloads it first).
-  -c           Use cached frames (skip extraction & resizing).
+  -c           Use cached frames (skip extraction/resizing from disk).
+               (Note: -c requires that you previously used -write so
+               'frames/' and 'resized/' are populated with .png files.)
+  -write       Store frames on disk in PNG format (lossless). This creates
+               two loading bars: one for extraction, one for resizing.
+               Without this, frames are handled purely in memory (one bar).
   -sub [lang]  Enable YouTube subtitles; optional language code.
   -f <fps>     Set a custom ASCII framerate (displays fewer frames per second).
                Audio still plays at normal speed (frames are skipped).
-  -noskip      Disable dynamic skipping. If we fall behind, we won't skip frames.
+  -noskip      Disable dynamic skipping (video may get out of sync).
   -debug       Show live FPS (frames drawn per second) top-right.
-  -color       Enable 256-color approximation (ASCII).
+  -color       Enable color approximation (each pixel is a colored block).
   -h, -help    Show this help message and exit.
 
 Examples:
   python {sys.argv[0]} movie.mp4
   python {sys.argv[0]} -y https://www.youtube.com/watch?v=XYZ -sub en -color -f 10
+  python {sys.argv[0]} -write myvideo.mp4
+  python {sys.argv[0]} -c  # Only works if you previously used -write
 """
     print(help_text)
 
 def parse_args(args):
-    global YT, UseCachedFrames, Subtitles, SubtitlesLang, SubtitlesUseLang
+    global YT, UseCachedFrames, WriteFrames, Subtitles, SubtitlesLang, SubtitlesUseLang
     global User_FPS, DisableDynamicSkip, DebugFPS, ColorMode
 
     local_file = None
@@ -135,6 +130,9 @@ def parse_args(args):
                 idx += 1
         elif arg == '-c':
             UseCachedFrames = True
+            idx += 1
+        elif arg == '-write':
+            WriteFrames = True
             idx += 1
         elif arg == '-sub':
             Subtitles = True
@@ -162,7 +160,6 @@ def parse_args(args):
             ColorMode = True
             idx += 1
         else:
-            # local file
             local_file = arg
             idx += 1
 
@@ -193,23 +190,41 @@ def main():
 
     local_file, youtube_link = parse_args(args)
 
-    # For local_file usage in non-YT mode, we start curses now.
     if not YT:
         stdscr = curses.initscr()
         start_curses()
 
     try:
         if not UseCachedFrames:
-            total_frames = get_video_frames(local_file, youtube_link)
-            if YT and Subtitles:
-                stdscr.addstr("Getting video captions\n")
-                stdscr.refresh()
-                get_captions(youtube_link)
-                stdscr.addstr("Got captions\n")
-                stdscr.refresh()
+            # No cached frames => we need to generate them
+            if WriteFrames:
+                # 1) Extract all frames => frames/*.png
+                total_frames = get_video_frames_png(local_file, youtube_link)
+                if YT and Subtitles:
+                    stdscr.addstr("Getting video captions\n")
+                    stdscr.refresh()
+                    get_captions(youtube_link)
+                    stdscr.addstr("Got captions\n")
+                    stdscr.refresh()
 
-            resize_images(total_frames)
+                # 2) Resize => resized/*.png
+                resize_images_png(total_frames)
+
+                # 3) Precompute from "resized/" folder
+                ascii_frames = precompute_ascii_frames_from_disk(total_frames)
+            else:
+                # Single pass: load each frame, resize in memory, precompute ASCII, free memory
+                # => single bar
+                ascii_frames, total_frames = load_resize_precompute_in_memory(local_file, youtube_link)
+                if YT and Subtitles:
+                    stdscr.addstr("Getting video captions\n")
+                    stdscr.refresh()
+                    get_captions(youtube_link)
+                    stdscr.addstr("Got captions\n")
+                    stdscr.refresh()
         else:
+            # -c => read from resized/*.png
+            # Must have previously run with -write
             stdscr.addstr("Using cached frames in 'resized/' folder.\n")
             stdscr.refresh()
 
@@ -221,8 +236,7 @@ def main():
                 stdscr.addstr("Got captions\n")
                 stdscr.refresh()
 
-        # Precompute frames: either color or grayscale
-        ascii_frames = precompute_ascii_frames(total_frames)
+            ascii_frames = precompute_ascii_frames_from_disk(total_frames)
 
         # Setup audio
         if YT:
@@ -243,7 +257,251 @@ def main():
     stop_curses()
 
 ################################################################################
-# Video Metadata (For -c mode)
+# Frame Extraction (PNG, Lossless)
+################################################################################
+
+def get_video_frames_png(local_file, youtube_link):
+    """
+    Loads frames from the video, saves each as frames/frame{i}.png (lossless).
+    Two-step approach with separate function for resizing.
+    """
+    global stdscr, Video_FPS, Video_Frames
+
+    if not YT:
+        cap = cv2.VideoCapture(local_file)
+    else:
+        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([youtube_link])
+            cap = cv2.VideoCapture("YouTubeTemporary/video.mp4")
+
+        stdscr = curses.initscr()
+        start_curses()
+
+    stdscr.addstr("Loading frames (PNG)\n")
+    stdscr.refresh()
+
+    Video_FPS = int(cap.get(cv2.CAP_PROP_FPS))
+    Video_Frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    loading_bar = LoadingBar(Video_Frames, barLength=stdscr.getmaxyx()[1] - 2)
+
+    success, frame = cap.read()
+    count = 0
+    y, x = curses.getsyx()
+
+    while success:
+        stdscr.addstr(y, x, f"Frame {count} / {Video_Frames - 1}\n")
+        loading_bar.progress = count
+        stdscr.addstr(loading_bar.display() + "\n")
+        stdscr.refresh()
+
+        # Save as PNG (lossless)
+        cv2.imwrite(f"frames/frame{count}.png", frame, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+
+        success, frame = cap.read()
+        count += 1
+
+    cap.release()
+
+    stdscr.addstr("\nFinished loading frames => frames/*.png\n")
+    stdscr.refresh()
+    return count
+
+################################################################################
+# Resizing => resized/*.png
+################################################################################
+
+def resize_images_png(framesAmount):
+    """
+    Reads frames/frame{i}.png => resizes => saved in resized/resized{i}.png
+    """
+    global stdscr
+    stdscr.addstr("Started resizing images (PNG)\n")
+    stdscr.refresh()
+    y, x = stdscr.getyx()
+
+    resize_bar = LoadingBar(framesAmount, barLength=stdscr.getmaxyx()[1] - 2)
+
+    for i in range(framesAmount):
+        stdscr.move(y, x)
+        resized_image = resize_image_png(i)
+        resized_image.save(f"resized/resized{i}.png", "PNG")
+
+        resize_bar.progress = i
+        stdscr.addstr("\n" + resize_bar.display() + "\n")
+
+    stdscr.addstr("\nResized images => resized/*.png\n")
+    stdscr.refresh()
+
+def resize_image_png(index):
+    """
+    Loads frames/frame{index}.png => resize => return PIL image
+    """
+    term_height, term_width = stdscr.getmaxyx()
+    new_height = max(1, term_height - 1)
+    new_width = max(1, term_width)
+
+    im = Image.open(f"frames/frame{index}.png")
+    if ColorMode:
+        im = im.convert("RGB")
+    else:
+        im = im.convert("L")
+
+    # NEAREST to avoid blur
+    im = im.resize((new_width, new_height), resample=Image.NEAREST)
+    return im
+
+################################################################################
+# Single-Pass In-Memory (No Write)
+################################################################################
+
+def load_resize_precompute_in_memory(local_file, youtube_link):
+    """
+    If not writing, we do a single pass:
+      1) read each frame from the video
+      2) convert/resize in memory
+      3) convert to ASCII
+      4) discard the frame to free memory
+    We only store the final ASCII data, not the images.
+    Returns (ascii_frames, total_frames).
+    """
+    global stdscr, Video_FPS, Video_Frames
+
+    if not YT:
+        cap = cv2.VideoCapture(local_file)
+    else:
+        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([youtube_link])
+            cap = cv2.VideoCapture("YouTubeTemporary/video.mp4")
+
+        stdscr = curses.initscr()
+        start_curses()
+
+    stdscr.addstr("Loading & Precomputing frames (IN MEMORY, single pass)\n")
+    stdscr.refresh()
+
+    Video_FPS = int(cap.get(cv2.CAP_PROP_FPS))
+    Video_Frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    load_bar = LoadingBar(Video_Frames, barLength=stdscr.getmaxyx()[1] - 2)
+    ascii_frames = []
+
+    term_height, term_width = stdscr.getmaxyx()
+    new_height = max(1, term_height - 1)
+    new_width = max(1, term_width)
+
+    y, x = curses.getsyx()
+    count = 0
+
+    success, frame = cap.read()
+    while success:
+        stdscr.move(y, x)
+        stdscr.addstr(f"Frame {count} / {Video_Frames - 1}\n")
+        load_bar.progress = count
+        stdscr.addstr(load_bar.display() + "\n")
+        stdscr.refresh()
+
+        # 1) Convert to PIL
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        im_pil = Image.fromarray(frame_rgb)
+
+        # 2) Color or Gray
+        if ColorMode:
+            im_pil = im_pil.convert("RGB")
+        else:
+            im_pil = im_pil.convert("L")
+
+        # 3) Resize
+        im_pil = im_pil.resize((new_width, new_height), resample=Image.NEAREST)
+
+        # 4) Convert to ASCII immediately
+        frame_data = []
+        pixels = im_pil.load()
+        for row in range(im_pil.height):
+            row_data = []
+            for col in range(im_pil.width):
+                if ColorMode:
+                    r, g, b = pixels[col, row]
+                    color_idx = xterm_256_index(r, g, b)
+                    pair_id = get_color_pair(color_idx, color_idx)
+                    row_data.append(('█', pair_id))
+                else:
+                    val = pixels[col, row]
+                    char_idx = int(val // 25)
+                    ascii_char = chars_gray[char_idx]
+                    row_data.append(ascii_char)
+            frame_data.append(row_data)
+
+        ascii_frames.append(frame_data)
+
+        # free memory by discarding 'frame' and 'im_pil'
+        frame = None
+        im_pil = None
+
+        success, frame = cap.read()
+        count += 1
+
+    cap.release()
+    stdscr.addstr("\nFinished single-pass in-memory load+precompute.\n")
+    stdscr.refresh()
+    return (ascii_frames, count)
+
+################################################################################
+# Precompute ASCII from Disk => 'resized/*.png'
+################################################################################
+
+def precompute_ascii_frames_from_disk(framesAmount):
+    """
+    Reads from 'resized/resized{i}.png' => convert to ASCII => returns list of frames.
+    """
+    global stdscr
+
+    stdscr.addstr("Precomputing ASCII frames from disk...\n")
+    stdscr.refresh()
+
+    term_height, term_width = stdscr.getmaxyx()
+    precomputed = []
+
+    bar = LoadingBar(framesAmount, barLength=term_width - 2)
+    y, x = stdscr.getyx()
+
+    for i in range(framesAmount):
+        stdscr.move(y, x)
+        stdscr.addstr(f"Converting frame {i}/{framesAmount-1}\n")
+
+        img_path = f"resized/resized{i}.png"
+        img = Image.open(img_path)
+        pixels = img.load()
+
+        frame_data = []
+        for row in range(img.height):
+            row_data = []
+            for col in range(img.width):
+                if ColorMode:
+                    r, g, b = pixels[col, row]
+                    color_idx = xterm_256_index(r, g, b)
+                    pair_id = get_color_pair(color_idx, color_idx)
+                    row_data.append(('█', pair_id))
+                else:
+                    val = pixels[col, row]
+                    char_idx = int(val // 25)
+                    ascii_char = chars_gray[char_idx]
+                    row_data.append(ascii_char)
+
+            frame_data.append(row_data)
+
+        precomputed.append(frame_data)
+
+        bar.progress = i
+        stdscr.addstr(bar.display() + "\n")
+        stdscr.refresh()
+
+    stdscr.addstr("Finished precomputing from disk.\n")
+    stdscr.refresh()
+    return precomputed
+
+################################################################################
+# Video Metadata
 ################################################################################
 
 def get_video_metadata(local_file, youtube_link):
@@ -263,145 +521,6 @@ def get_video_metadata(local_file, youtube_link):
     return Video_Frames
 
 ################################################################################
-# Frame Extraction
-################################################################################
-
-def get_video_frames(local_file, youtube_link):
-    global stdscr, Video_FPS, Video_Frames
-
-    if not YT:
-        cap = cv2.VideoCapture(local_file)
-    else:
-        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([youtube_link])
-            cap = cv2.VideoCapture("YouTubeTemporary/video.mp4")
-
-        # For YouTube, now init curses after we’ve downloaded
-        stdscr = curses.initscr()
-        start_curses()
-
-    stdscr.addstr("Loading frames\n")
-    stdscr.refresh()
-
-    Video_FPS = int(cap.get(cv2.CAP_PROP_FPS))
-    Video_Frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    loading_bar = LoadingBar(Video_Frames, barLength=stdscr.getmaxyx()[1] - 2)
-
-    success, image = cap.read()
-    count = 0
-    y, x = curses.getsyx()
-
-    while success:
-        stdscr.addstr(y, x, f"Frame {count} / {Video_Frames - 1}")
-        loading_bar.progress = count
-        stdscr.addstr(f"\n{loading_bar.display()}\n")
-        stdscr.refresh()
-
-        cv2.imwrite(f"frames/frame{count}.jpg", image)
-        success, image = cap.read()
-        count += 1
-
-    cap.release()
-
-    stdscr.addstr("\nFinished loading frames\n")
-    stdscr.refresh()
-    return count
-
-################################################################################
-# Resizing
-################################################################################
-
-def resize_images(framesAmount):
-    stdscr.addstr("Started resizing images\n")
-    stdscr.refresh()
-    y, x = stdscr.getyx()
-
-    resize_bar = LoadingBar(Video_Frames, barLength=stdscr.getmaxyx()[1] - 2)
-
-    for i in range(framesAmount):
-        stdscr.move(y, x)
-        resized_image = resize_image(i, y, x)
-        resized_image.save(f"resized/resized{i}.jpg")
-
-        resize_bar.progress = i
-        stdscr.addstr(f"\n{resize_bar.display()}\n")
-
-    stdscr.addstr("\nResized images\n")
-    stdscr.refresh()
-
-def resize_image(index, y, x):
-    stdscr.addstr(y, x, f"Resized Image {index}")
-    stdscr.refresh()
-
-    term_height, term_width = stdscr.getmaxyx()
-    # We subtract at least 1 row for any debug info. 
-    new_height = max(1, term_height - 1)
-    new_width = max(1, term_width)
-
-    im = Image.open(f"frames/frame{index}.jpg")
-    if ColorMode:
-        im = im.convert('RGB')
-    else:
-        im = im.convert('L')
-
-    im = im.resize((new_width, new_height))
-    return im
-
-################################################################################
-# Precompute ASCII frames (with or without 256-color)
-################################################################################
-
-def precompute_ascii_frames(framesAmount):
-    stdscr.addstr("Precomputing ASCII frames...\n")
-    stdscr.refresh()
-
-    term_height, term_width = stdscr.getmaxyx()
-    precomputed = []
-
-    bar = LoadingBar(framesAmount, barLength=term_width - 2)
-    y, x = stdscr.getyx()
-
-    for i in range(framesAmount):
-        stdscr.move(y, x)
-        stdscr.addstr(f"Converting frame {i}/{framesAmount-1}\n")
-
-        img_path = f"resized/resized{i}.jpg"
-        img = Image.open(img_path)
-        pixels = img.load()
-
-        frame_data = []
-        for row in range(img.height):
-            row_data = []
-            for col in range(img.width):
-                if ColorMode:
-                    r, g, b = pixels[col, row]
-                    # 1) ASCII char based on brightness
-                    brightness = (r + g + b) / 3
-                    char_idx = int(brightness // 25)  # 0..10
-                    ascii_char = chars_gray[char_idx]
-
-                    # 2) Get the 256-color pair
-                    color_pair_id = get_color_pair(r, g, b)
-                    row_data.append((ascii_char, color_pair_id))
-                else:
-                    val = pixels[col, row]
-                    char_idx = int(val // 25)  # 0..10
-                    ascii_char = chars_gray[char_idx]
-                    row_data.append(ascii_char)
-            frame_data.append(row_data)
-
-        precomputed.append(frame_data)
-
-        bar.progress = i
-        stdscr.addstr(bar.display() + "\n")
-        stdscr.refresh()
-
-    stdscr.addstr("Finished precomputing.\n")
-    stdscr.refresh()
-    return precomputed
-
-################################################################################
 # Drawing / Playback
 ################################################################################
 
@@ -416,11 +535,10 @@ def draw_images(framesAmount, ascii_frames, player):
     if effective_fps <= 0:
         effective_fps = Video_FPS
 
-    # skip_factor if user_fps < video_fps
     skip_factor = max(1, int(round(Video_FPS / effective_fps)))
 
     start_time = time.time()
-    skip_threshold = 0.05  # 50ms behind => skip
+    skip_threshold = 0.05
 
     last_fps_time = time.time()
     frames_in_second = 0
@@ -439,20 +557,18 @@ def draw_images(framesAmount, ascii_frames, player):
         if now < t_ideal:
             time.sleep(t_ideal - now)
 
-        # Draw the frame
         frame_data = ascii_frames[frame_idx]
         for row_idx, row_data in enumerate(frame_data):
             for col_idx, px_data in enumerate(row_data):
                 if ColorMode:
-                    (char, color_pair_id) = px_data
-                    stdscr.addstr(row_idx, col_idx, char, curses.color_pair(color_pair_id))
+                    (char, pair_id) = px_data
+                    stdscr.addstr(row_idx, col_idx, char, curses.color_pair(pair_id))
                 else:
                     stdscr.addstr(row_idx, col_idx, px_data)
 
         if YT and Subtitles:
             get_caption_at_frame(frame_idx)
 
-        # Debug FPS
         frames_in_second += 1
         current_time = time.time()
         if current_time - last_fps_time >= 1.0:
@@ -464,8 +580,10 @@ def draw_images(framesAmount, ascii_frames, player):
             s = f"FPS:{displayed_fps:.2f}"
             max_y, max_x = stdscr.getmaxyx()
             debug_col = max_x - len(s) - 1
-            # Show debug text in, say, green. (0,255,0)
-            debug_pair = get_color_pair(0, 255, 0)
+
+            green_idx = xterm_256_index(0, 255, 0)
+            black_idx = 0
+            debug_pair = get_color_pair(green_idx, black_idx)
             stdscr.addstr(0, debug_col, s, curses.color_pair(debug_pair))
 
         stdscr.refresh()
@@ -486,13 +604,12 @@ def get_captions(youtube_link):
         CaptionsArray = YouTubeTranscriptApi.get_transcript(video_id, languages=[SubtitlesLang])
 
 def get_caption_at_frame(frame_idx):
-    # Clear last line
     for col in range(stdscr.getmaxyx()[1]):
         stdscr.addstr(stdscr.getmaxyx()[0] - 1, col, " ")
 
     time_needed = frame_idx / Video_FPS
     global PreviousCaptionsArrayIndex
-    time_passed = CaptionsArray[0]["start"]  # just for reference
+    time_passed = CaptionsArray[0]["start"]
 
     text = ""
     found_new_caption = False
@@ -519,11 +636,8 @@ def start_curses():
     curses.curs_set(0)
     curses.noecho()
     curses.cbreak()
-    # Very important: enable color and assume 256-color mode if terminal supports it.
     curses.start_color()
     curses.use_default_colors()
-    # If your environment variable $TERM is set to xterm-256color, Python curses 
-    # should allow init_color() for 256 colors.
 
 def stop_curses():
     curses.curs_set(1)
