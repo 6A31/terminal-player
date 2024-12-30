@@ -1,6 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+ASCII Video Player / YouTube Downloader / Subtitles
+===================================================
+This script allows playing local or YouTube videos in ASCII (grayscale or color)
+directly in the terminal via curses and VLC. It can store frames as PNGs,
+resize them, and optionally cache frames for faster replays.
+
+Usage:
+    script.py [options] <local_file>  (or)
+    script.py -y <YouTubeLink>
+
+Key Options:
+    -write       Write frames to disk as PNGs.
+    -c           Use cached frames (requires previous run with -write).
+    -sub [lang]  Enable subtitles (optionally specify a language code).
+    -f <fps>     Set a custom ASCII framerate.
+    -noskip      Disable dynamic skipping.
+    -debug       Show live FPS (top-right corner).
+    -color       Enable colored output.
+    -y <link>    Use a YouTube link.
+    -h, -help    Show help text.
+
+Example:
+    script.py movie.mp4
+    script.py -y https://www.youtube.com/watch?v=XYZ -sub en -color -f 10
+    script.py -write myvideo.mp4
+    script.py -c
+
+Notes:
+    - If you use -c, you do not need to specify a video. You can optionally
+      specify a video anyway—it will be ignored in favor of the cached data.
+    - If no video is specified and -c is not used, an error is triggered.
+    - -write and -c cannot be used together.
+"""
+
 import sys
 import time
 import math
@@ -66,6 +101,9 @@ def xterm_256_index(r, g, b):
     return 16 + (36 * R) + (6 * G) + B
 
 def get_color_pair(fg_idx, bg_idx):
+    """
+    Return a curses color pair ID for the given FG/BG xterm-256 indices.
+    """
     global NEXT_COLOR_PAIR_ID
 
     key = (fg_idx, bg_idx)
@@ -112,8 +150,8 @@ Examples:
 
 def parse_args(args):
     """
-    Parse CLI arguments. Return (local_file, youtube_link).
-    Most validation is deferred to main() to simplify this function.
+    Parse command-line arguments and set global flags accordingly.
+    Return (local_file, youtube_link).
     """
     global YT, UseCachedFrames, WriteFrames, Subtitles, SubtitlesLang, SubtitlesUseLang
     global User_FPS, DisableDynamicSkip, DebugFPS, ColorMode
@@ -133,10 +171,6 @@ def parse_args(args):
             if idx < len(args):
                 youtube_link = args[idx]
                 idx += 1
-            else:
-                # Missing the actual YouTube link
-                print("Error: -y flag used but no YouTube link provided.")
-                sys.exit(1)
         elif arg == '-c':
             UseCachedFrames = True
             idx += 1
@@ -146,7 +180,6 @@ def parse_args(args):
         elif arg == '-sub':
             Subtitles = True
             idx += 1
-            # If next arg is not another flag, it might be the language code
             if idx < len(args) and not args[idx].startswith('-'):
                 SubtitlesLang = args[idx]
                 SubtitlesUseLang = True
@@ -157,12 +190,9 @@ def parse_args(args):
                 try:
                     User_FPS = float(args[idx])
                 except ValueError:
-                    print("Invalid -f argument (must be numeric).")
+                    print("Invalid -f argument.")
                     sys.exit(1)
                 idx += 1
-            else:
-                print("Error: -f flag used but no FPS value provided.")
-                sys.exit(1)
         elif arg == '-noskip':
             DisableDynamicSkip = True
             idx += 1
@@ -173,7 +203,7 @@ def parse_args(args):
             ColorMode = True
             idx += 1
         else:
-            # Assume it's a local file
+            # Assume this is a local file
             local_file = arg
             idx += 1
 
@@ -184,6 +214,9 @@ def parse_args(args):
 ################################################################################
 
 def get_vlc_player(path):
+    """
+    Create and return a VLC media player instance for the given video path.
+    """
     instance = vlc.Instance('--intf=dummy', '--no-video', '--quiet')
     player = instance.media_player_new()
     media = instance.media_new(path)
@@ -199,53 +232,30 @@ def main():
 
     args = sys.argv[1:]
     if not args:
-        # No arguments at all
         print_help()
         sys.exit(0)
 
     local_file, youtube_link = parse_args(args)
 
-    # 1) Mutually exclusive check for -c and -write
-    if UseCachedFrames and WriteFrames:
-        print("Error: Cannot use -c and -write at the same time.")
+    # Error checks...
+    if WriteFrames and UseCachedFrames:
+        print("Error: The flags -write and -c cannot be used together.")
+        sys.exit(1)
+    if not UseCachedFrames and not YT and not local_file:
+        print("Error: No video file or YouTube link was provided.")
         sys.exit(1)
 
-    # 2) If YT is used, youtube_link must not be None. 
-    #    Otherwise, we must have a local_file.
-    if YT:
-        if youtube_link is None:
-            print("Error: -y was used but no valid YouTube link was provided.")
-            sys.exit(1)
-    else:
-        if local_file is None:
-            print("Error: No YouTube link (-y) and no local file specified.")
-            sys.exit(1)
-
-    # Initialize curses
-    # We won't do it if we are about to do YT (some logic might do it later),
-    # but let's do it consistently for all code paths that show progress bars:
     if not YT:
         stdscr = curses.initscr()
         start_curses()
 
-    # 3) If color mode is requested, we will check 256-color support
-    #    We must do this after curses is initiated.
-    if ColorMode:
-        # Some terminals return True for has_colors() but only 8 or 16 colors.
-        # We'll also check if curses.COLORS >= 256.
-        if not curses.has_colors() or curses.COLORS < 256:
-            stop_audio_and_curses()  # ensure we reset terminal
-            print("Error: Terminal does not support 256 colors. Cannot use -color mode.")
-            sys.exit(1)
-
     try:
         if not UseCachedFrames:
-            # No cached frames => we need to generate them or do in-memory
             if WriteFrames:
                 # 1) Extract frames => frames/*.png
                 total_frames = get_video_frames_png(local_file, youtube_link)
 
-                # If subtitles are requested from YouTube
+                # 2) (Optional) get captions if YT and subtitles
                 if YT and Subtitles:
                     stdscr.addstr("Getting video captions\n")
                     stdscr.refresh()
@@ -253,17 +263,17 @@ def main():
                     stdscr.addstr("Got captions\n")
                     stdscr.refresh()
 
-                # 2) Resize => resized/*.png
+                # 3) Resize => resized/*.png
                 resize_images_png(total_frames)
 
-                # 3) Write out metadata so that -c can verify it
+                # 4) Write metadata => resized/metadata.txt
                 write_cache_metadata(local_file, youtube_link, total_frames)
 
-                # 4) Precompute ASCII from "resized/" folder
+                # 5) **Precompute ASCII** from disk (now that it exists)
                 ascii_frames = precompute_ascii_frames_from_disk(total_frames)
 
             else:
-                # Single pass in-memory: load each frame, optionally skip, resize, convert
+                # Single pass in-memory approach
                 ascii_frames, total_frames = load_resize_precompute_in_memory(local_file, youtube_link)
                 if YT and Subtitles:
                     stdscr.addstr("Getting video captions\n")
@@ -273,11 +283,10 @@ def main():
                     stdscr.refresh()
 
         else:
-            # -c => read from resized/*.png
-            # Must have previously run with -write
-            check_cached_frames(local_file, youtube_link)  # may sys.exit(1)
-
+            # Use cached frames => validate, read metadata, load ASCII from 'resized/'
+            check_cached_frames(local_file, youtube_link)
             total_frames = get_video_metadata(local_file, youtube_link)
+
             if YT and Subtitles:
                 stdscr.addstr("Getting video captions\n")
                 stdscr.refresh()
@@ -287,7 +296,7 @@ def main():
 
             ascii_frames = precompute_ascii_frames_from_disk(total_frames)
 
-        # Setup audio
+        # Setup audio source
         if YT:
             audio_source = "YouTubeTemporary/video.mp4"
         else:
@@ -300,7 +309,6 @@ def main():
         stop_audio_and_curses()
         sys.exit(0)
     except Exception as e:
-        # If any unexpected exception, reset curses and re-raise
         stop_audio_and_curses()
         raise e
 
@@ -324,7 +332,6 @@ def get_video_frames_png(local_file, youtube_link):
             ydl.download([youtube_link])
             cap = cv2.VideoCapture("YouTubeTemporary/video.mp4")
 
-        # If YT was used, ensure curses is initialized (it might be re-inited)
         stdscr = curses.initscr()
         start_curses()
 
@@ -548,6 +555,50 @@ def write_cache_metadata(local_file, youtube_link, framesAmount):
         f.write(f"ResizedFrames={framesAmount}\n")
 
 ################################################################################
+# precomputing for write mode
+################################################################################
+
+def precompute_ascii_frames_from_disk(frames_amount):
+    """
+    Reads each resized/resized{i}.png, converts to ASCII or color, returns list of frames.
+    """
+    global stdscr
+
+    ascii_frames = []
+    term_height, term_width = stdscr.getmaxyx()
+    for i in range(frames_amount):
+        path = f"resized/resized{i}.png"
+        if not os.path.exists(path):
+            continue
+
+        im = Image.open(path)
+        if ColorMode:
+            im = im.convert("RGB")
+        else:
+            im = im.convert("L")
+
+        frame_data = []
+        pixels = im.load()
+        for row in range(im.height):
+            row_data = []
+            for col in range(im.width):
+                if ColorMode:
+                    r, g, b = pixels[col, row]
+                    color_idx = xterm_256_index(r, g, b)
+                    pair_id = get_color_pair(color_idx, color_idx)
+                    row_data.append(('█', pair_id))
+                else:
+                    val = pixels[col, row]
+                    char_idx = int(val // 25)
+                    ascii_char = chars_gray[char_idx]
+                    row_data.append(ascii_char)
+            frame_data.append(row_data)
+
+        ascii_frames.append(frame_data)
+
+    return ascii_frames
+
+################################################################################
 # Check cached frames
 ################################################################################
 
@@ -556,8 +607,8 @@ def check_cached_frames(local_file, youtube_link):
     Ensure that:
       - 'resized/' folder exists
       - 'resized/metadata.txt' exists
-      - The InputFile matches
-      - The previously used FPS matches the currently requested one
+      - The InputFile matches (warn if not)
+      - The previously used FPS matches the currently requested one (warn if not)
     """
     global stdscr, User_FPS
 
@@ -591,8 +642,7 @@ def check_cached_frames(local_file, youtube_link):
                 f"but you are trying to play '{current_input}'.\n"
             )
             stdscr.refresh()
-            # Decide if you want to allow or exit
-            # sys.exit(1)
+            # We continue, but you could exit if you want stricter enforcement.
     else:
         stdscr.addstr("Warning: No 'InputFile' in metadata.txt. Cannot verify match.\n")
 
@@ -606,14 +656,16 @@ def check_cached_frames(local_file, youtube_link):
                 f"This may cause desync or incorrect playback.\n"
             )
             stdscr.refresh()
-            # Decide if you want to allow or exit
-            # sys.exit(1)
 
 ################################################################################
 # Video Metadata
 ################################################################################
 
 def get_video_metadata(local_file, youtube_link):
+    """
+    Return the total number of frames from the specified local file or YouTube temp file.
+    Also sets global Video_FPS, Video_Frames.
+    """
     global Video_FPS, Video_Frames, stdscr
     if YT:
         path = "YouTubeTemporary/video.mp4"
@@ -634,6 +686,10 @@ def get_video_metadata(local_file, youtube_link):
 ################################################################################
 
 def draw_images(framesAmount, ascii_frames, player):
+    """
+    Play the audio, then loop through frames (ASCII or colored blocks), drawing
+    them in the terminal, optionally skipping frames for real-time performance.
+    """
     stdscr.addstr("Press any key to start drawing\n")
     stdscr.refresh()
     stdscr.getch()
@@ -706,6 +762,10 @@ def draw_images(framesAmount, ascii_frames, player):
 ################################################################################
 
 def get_captions(youtube_link):
+    """
+    Download and store the transcript from a YouTube link, in the global CaptionsArray.
+    If a subtitle language is specified, use it; otherwise fetch the default.
+    """
     global CaptionsArray
     video_id = extract.video_id(youtube_link)
     if not SubtitlesUseLang:
@@ -714,6 +774,9 @@ def get_captions(youtube_link):
         CaptionsArray = YouTubeTranscriptApi.get_transcript(video_id, languages=[SubtitlesLang])
 
 def get_caption_at_frame(frame_idx):
+    """
+    Update and display captions in the last line, based on the current frame's timestamp.
+    """
     for col in range(stdscr.getmaxyx()[1]):
         stdscr.addstr(stdscr.getmaxyx()[0] - 1, col, " ")
 
@@ -743,6 +806,9 @@ def get_caption_at_frame(frame_idx):
 ################################################################################
 
 def start_curses():
+    """
+    Configure curses in "visual" mode (no cursor, no echo, etc.).
+    """
     curses.curs_set(0)
     curses.noecho()
     curses.cbreak()
@@ -750,11 +816,17 @@ def start_curses():
     curses.use_default_colors()
 
 def stop_curses():
+    """
+    Restore terminal from curses mode to normal.
+    """
     curses.curs_set(1)
     curses.echo()
     curses.nocbreak()
 
 def stop_audio_and_curses():
+    """
+    Stop audio and safely restore terminal, ignoring any curses errors.
+    """
     try:
         stop_curses()
     except:
@@ -766,6 +838,9 @@ def stop_audio_and_curses():
 ################################################################################
 
 class LoadingBar:
+    """
+    Simple ASCII loading bar used to indicate progress when extracting or resizing frames.
+    """
     def __init__(self, total, borderChars=["[", "]"], progressChar="#", emptyChar=" ", barLength=50):
         self.total = total
         self.progress = 0
