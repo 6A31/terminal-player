@@ -89,7 +89,12 @@ Options:
    python player.py movie.mp4 -f 10
    ```
 
+## Sample Videos
+
+There are 4 sample videos in the `sample_video` folder that you can use to test color, timing, and audio playback. They are handy for experimenting with features like `-color`, `-f <fps>`, or playback delay
+
 ## Notes
+
 - **Performance**: Color mode uses the most performance, you can save performance by running at a lower resolution, or a lower framerate by using a custom framerate with `-f <fps>` (for example 25).
 - **Plaback lag**: If you have low FPS at playback, the only option is to reduce the resolution, or switch from color to grayscale.
 - **Caching**: When running with `-write`, the script writes frames in `frames/` and resized frames in `resized/`, plus a `resized/metadata.txt` for future verification (used by `-c`).
@@ -107,5 +112,3 @@ Options:
 
 ### Grayscale Mode
 <img width="1442" alt="grayscale showcase" src="https://github.com/user-attachments/assets/db653114-8eaa-4af7-bdc3-e890e20ee029" />
-
-
