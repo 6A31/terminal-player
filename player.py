@@ -6,7 +6,7 @@ import time
 import math
 import curses
 import cv2
-import os  # <-- ADDED
+import os
 from PIL import Image
 import yt_dlp as youtube_dl
 import vlc
@@ -111,6 +111,10 @@ Examples:
     print(help_text)
 
 def parse_args(args):
+    """
+    Parse CLI arguments. Return (local_file, youtube_link).
+    Most validation is deferred to main() to simplify this function.
+    """
     global YT, UseCachedFrames, WriteFrames, Subtitles, SubtitlesLang, SubtitlesUseLang
     global User_FPS, DisableDynamicSkip, DebugFPS, ColorMode
 
@@ -129,6 +133,10 @@ def parse_args(args):
             if idx < len(args):
                 youtube_link = args[idx]
                 idx += 1
+            else:
+                # Missing the actual YouTube link
+                print("Error: -y flag used but no YouTube link provided.")
+                sys.exit(1)
         elif arg == '-c':
             UseCachedFrames = True
             idx += 1
@@ -138,6 +146,7 @@ def parse_args(args):
         elif arg == '-sub':
             Subtitles = True
             idx += 1
+            # If next arg is not another flag, it might be the language code
             if idx < len(args) and not args[idx].startswith('-'):
                 SubtitlesLang = args[idx]
                 SubtitlesUseLang = True
@@ -148,9 +157,12 @@ def parse_args(args):
                 try:
                     User_FPS = float(args[idx])
                 except ValueError:
-                    print("Invalid -f argument.")
+                    print("Invalid -f argument (must be numeric).")
                     sys.exit(1)
                 idx += 1
+            else:
+                print("Error: -f flag used but no FPS value provided.")
+                sys.exit(1)
         elif arg == '-noskip':
             DisableDynamicSkip = True
             idx += 1
@@ -161,6 +173,7 @@ def parse_args(args):
             ColorMode = True
             idx += 1
         else:
+            # Assume it's a local file
             local_file = arg
             idx += 1
 
@@ -186,18 +199,48 @@ def main():
 
     args = sys.argv[1:]
     if not args:
+        # No arguments at all
         print_help()
         sys.exit(0)
 
     local_file, youtube_link = parse_args(args)
 
+    # 1) Mutually exclusive check for -c and -write
+    if UseCachedFrames and WriteFrames:
+        print("Error: Cannot use -c and -write at the same time.")
+        sys.exit(1)
+
+    # 2) If YT is used, youtube_link must not be None. 
+    #    Otherwise, we must have a local_file.
+    if YT:
+        if youtube_link is None:
+            print("Error: -y was used but no valid YouTube link was provided.")
+            sys.exit(1)
+    else:
+        if local_file is None:
+            print("Error: No YouTube link (-y) and no local file specified.")
+            sys.exit(1)
+
+    # Initialize curses
+    # We won't do it if we are about to do YT (some logic might do it later),
+    # but let's do it consistently for all code paths that show progress bars:
     if not YT:
         stdscr = curses.initscr()
         start_curses()
 
+    # 3) If color mode is requested, we will check 256-color support
+    #    We must do this after curses is initiated.
+    if ColorMode:
+        # Some terminals return True for has_colors() but only 8 or 16 colors.
+        # We'll also check if curses.COLORS >= 256.
+        if not curses.has_colors() or curses.COLORS < 256:
+            stop_audio_and_curses()  # ensure we reset terminal
+            print("Error: Terminal does not support 256 colors. Cannot use -color mode.")
+            sys.exit(1)
+
     try:
         if not UseCachedFrames:
-            # No cached frames => we need to generate them
+            # No cached frames => we need to generate them or do in-memory
             if WriteFrames:
                 # 1) Extract frames => frames/*.png
                 total_frames = get_video_frames_png(local_file, youtube_link)
@@ -232,7 +275,7 @@ def main():
         else:
             # -c => read from resized/*.png
             # Must have previously run with -write
-            check_cached_frames(local_file, youtube_link)  # <-- ADDED
+            check_cached_frames(local_file, youtube_link)  # may sys.exit(1)
 
             total_frames = get_video_metadata(local_file, youtube_link)
             if YT and Subtitles:
@@ -257,6 +300,7 @@ def main():
         stop_audio_and_curses()
         sys.exit(0)
     except Exception as e:
+        # If any unexpected exception, reset curses and re-raise
         stop_audio_and_curses()
         raise e
 
@@ -280,6 +324,7 @@ def get_video_frames_png(local_file, youtube_link):
             ydl.download([youtube_link])
             cap = cv2.VideoCapture("YouTubeTemporary/video.mp4")
 
+        # If YT was used, ensure curses is initialized (it might be re-inited)
         stdscr = curses.initscr()
         start_curses()
 
@@ -546,7 +591,7 @@ def check_cached_frames(local_file, youtube_link):
                 f"but you are trying to play '{current_input}'.\n"
             )
             stdscr.refresh()
-            # Depending on your preference, you could either proceed or exit:
+            # Decide if you want to allow or exit
             # sys.exit(1)
     else:
         stdscr.addstr("Warning: No 'InputFile' in metadata.txt. Cannot verify match.\n")
@@ -561,7 +606,7 @@ def check_cached_frames(local_file, youtube_link):
                 f"This may cause desync or incorrect playback.\n"
             )
             stdscr.refresh()
-            # Decide if you want to allow or exit:
+            # Decide if you want to allow or exit
             # sys.exit(1)
 
 ################################################################################
@@ -746,4 +791,3 @@ class LoadingBar:
 
 if __name__ == "__main__":
     main()
-
