@@ -97,3 +97,15 @@ Options:
 - **Color Mode**: Using `-color` can slow down rendering because each pixel is drawn as a colored block. Grayscale ASCII is usually faster.
 - **Subtitles**: Only works automatically for YouTube videos if subtitles are available. If no subtitles exist, no text will be displayed.
 - **Windows Support**: On Windows, ensure VLC is installed and its directory is added to your PATH. If you encounter issues with Python dependencies or paths, use `python -m pip` for installations and check your VLC installation is accessible from the terminal.
+
+## Showcases
+
+### Color Mode
+
+<img width="1898" alt="advanced_color_showcase" src="https://github.com/user-attachments/assets/89cb7b27-769a-41d6-b5bb-a479611e83b1" />
+<img width="1920" alt="color_showcase" src="https://github.com/user-attachments/assets/c4d2a9b5-8886-45c8-bd4b-393fcf21d1e6" />
+
+### Grayscale Mode
+<img width="1442" alt="grayscale showcase" src="https://github.com/user-attachments/assets/db653114-8eaa-4af7-bdc3-e890e20ee029" />
+
+
