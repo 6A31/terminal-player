@@ -81,7 +81,7 @@ Options:
    ```
    Then, to use those frames later:
    ```
-   python player.py -c
+   python player.py myvideo.mp4 -c
    ```
 
 4. **Force ASCII playback at 10 FPS**:
