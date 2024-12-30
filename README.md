@@ -89,7 +89,7 @@ Options:
    ```
 
 ## Notes
-
+- **Performance**: Color mode uses the most performance, you can save performance by running at a lower resolution, or a lower framerate by using a custom framerate with `-f <fps>` (for example 25)
 - **Caching**: When running with `-write`, the script writes frames in `frames/` and resized frames in `resized/`, plus a `resized/metadata.txt` for future verification (used by `-c`).
 - **Frame Skipping**: If you provide `-f <fps>` and that FPS is lower than the source, only approximately `(Video_FPS / <fps>)` frames are decoded. This significantly reduces CPU usage for high-FPS sources.
 - **Color Mode**: Using `-color` can slow down rendering because each pixel is drawn as a colored block. Grayscale ASCII is usually faster.
