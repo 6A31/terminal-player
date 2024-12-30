@@ -6,6 +6,7 @@ import time
 import math
 import curses
 import cv2
+import os  # <-- ADDED
 from PIL import Image
 import yt_dlp as youtube_dl
 import vlc
@@ -21,16 +22,16 @@ ydl_opts = {
     'outtmpl': 'YouTubeTemporary/video.%(ext)s',
 }
 
-YT = False               # True if playing from YouTube
-UseCachedFrames = False  # If True, skip extraction/resizing (must have existing resized/*.png)
-WriteFrames = False      # If True, store frames to disk as .png (lossless)
-Subtitles = False        # YouTube subtitles if -sub
+YT = False
+UseCachedFrames = False
+WriteFrames = False
+Subtitles = False
 SubtitlesLang = None
 SubtitlesUseLang = False
 
 DisableDynamicSkip = False
 DebugFPS = False
-ColorMode = False           # If True, each pixel is a colored block
+ColorMode = False
 PreviousCaptionsArrayIndex = 0
 
 Video_FPS = None
@@ -88,14 +89,14 @@ Usage: {sys.argv[0]} [options] <local_file> or -y <YouTubeLink>
 Options:
   -y <link>    Play a YouTube video (downloads it first).
   -c           Use cached frames (skip extraction/resizing from disk).
-               (Note: -c requires that you previously used -write so
-               'frames/' and 'resized/' are populated with .png files.)
+               (Requires that you previously used -write so 'resized/' is populated
+               with .png files and metadata.)
   -write       Store frames on disk in PNG format (lossless). This creates
                two loading bars: one for extraction, one for resizing.
                Without this, frames are handled purely in memory (one bar).
   -sub [lang]  Enable YouTube subtitles; optional language code.
-  -f <fps>     Set a custom ASCII framerate (displays fewer frames per second).
-               Audio still plays at normal speed (frames are skipped).
+  -f <fps>     Set a custom ASCII framerate (fewer frames per second).
+               Audio still plays at normal speed (frames may be skipped).
   -noskip      Disable dynamic skipping (video may get out of sync).
   -debug       Show live FPS (frames drawn per second) top-right.
   -color       Enable color approximation (each pixel is a colored block).
@@ -198,8 +199,10 @@ def main():
         if not UseCachedFrames:
             # No cached frames => we need to generate them
             if WriteFrames:
-                # 1) Extract all frames => frames/*.png
+                # 1) Extract frames => frames/*.png
                 total_frames = get_video_frames_png(local_file, youtube_link)
+
+                # If subtitles are requested from YouTube
                 if YT and Subtitles:
                     stdscr.addstr("Getting video captions\n")
                     stdscr.refresh()
@@ -210,10 +213,14 @@ def main():
                 # 2) Resize => resized/*.png
                 resize_images_png(total_frames)
 
-                # 3) Precompute from "resized/" folder
+                # 3) Write out metadata so that -c can verify it
+                write_cache_metadata(local_file, youtube_link, total_frames)
+
+                # 4) Precompute ASCII from "resized/" folder
                 ascii_frames = precompute_ascii_frames_from_disk(total_frames)
+
             else:
-                # Single pass: load each frame, resize in memory, precompute ASCII, free memory
+                # Single pass in-memory: load each frame, optionally skip, resize, convert
                 ascii_frames, total_frames = load_resize_precompute_in_memory(local_file, youtube_link)
                 if YT and Subtitles:
                     stdscr.addstr("Getting video captions\n")
@@ -221,10 +228,11 @@ def main():
                     get_captions(youtube_link)
                     stdscr.addstr("Got captions\n")
                     stdscr.refresh()
+
         else:
-            # -c => read from resized/*.png (already extracted => can't skip)
-            stdscr.addstr("Using cached frames in 'resized/' folder.\n")
-            stdscr.refresh()
+            # -c => read from resized/*.png
+            # Must have previously run with -write
+            check_cached_frames(local_file, youtube_link)  # <-- ADDED
 
             total_frames = get_video_metadata(local_file, youtube_link)
             if YT and Subtitles:
@@ -261,7 +269,7 @@ def main():
 def get_video_frames_png(local_file, youtube_link):
     """
     Loads frames from the video, saves each as frames/frame{i}.png (lossless).
-    Then we do resizing separately.
+    Then do resizing in a separate step.
     """
     global stdscr, Video_FPS, Video_Frames
 
@@ -281,49 +289,45 @@ def get_video_frames_png(local_file, youtube_link):
     Video_FPS = int(cap.get(cv2.CAP_PROP_FPS))
     Video_Frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # CHANGED/ADDED: Calculate skip factor so we decode fewer frames if -f was supplied
+    # Calculate skip factor so we decode fewer frames if -f was supplied
     skip_factor = 1
     if User_FPS and User_FPS > 0:
         if User_FPS < Video_FPS:
             skip_factor = max(1, int(round(Video_FPS / User_FPS)))
-        # If User_FPS >= Video_FPS, skip_factor remains 1 (decode all frames)
 
-    # We don't know exactly how many frames we'll keep after skipping,
-    # but we can guess. For the loading bar, let's do a simple upper bound:
+    # We'll guess how many frames we keep
     expected_kept_frames = math.ceil(Video_Frames / skip_factor)
-
     loading_bar = LoadingBar(expected_kept_frames, barLength=stdscr.getmaxyx()[1] - 2)
 
     success, frame = cap.read()
-    count = 0      # count of frames we actually keep
+    count = 0
     y, x = curses.getsyx()
 
     while success:
-        # Display progress for the frames we keep
         stdscr.addstr(y, x, f"Frame {count} / {expected_kept_frames}\n")
         loading_bar.progress = count
         stdscr.addstr(loading_bar.display() + "\n")
         stdscr.refresh()
 
-        # Save as PNG (lossless)
+        # Save as PNG
+        if not os.path.exists("frames"):
+            os.makedirs("frames", exist_ok=True)
         cv2.imwrite(f"frames/frame{count}.png", frame, [cv2.IMWRITE_PNG_COMPRESSION, 0])
         count += 1
 
-        # Now skip skip_factor - 1 frames in the capture
+        # Skip skip_factor - 1 frames
         for _ in range(skip_factor - 1):
-            # Just grab them; don't decode
             success = cap.grab()
             if not success:
                 break
 
-        # Attempt to read next actual decoded frame
         success, frame = cap.read()
 
     cap.release()
 
     stdscr.addstr("\nFinished loading frames => frames/*.png\n")
     stdscr.refresh()
-    return count  # Return how many frames we actually wrote
+    return count
 
 ################################################################################
 # Resizing => resized/*.png
@@ -337,6 +341,9 @@ def resize_images_png(framesAmount):
     stdscr.addstr("Started resizing images (PNG)\n")
     stdscr.refresh()
     y, x = stdscr.getyx()
+
+    if not os.path.exists("resized"):
+        os.makedirs("resized", exist_ok=True)
 
     resize_bar = LoadingBar(framesAmount, barLength=stdscr.getmaxyx()[1] - 2)
 
@@ -400,13 +407,12 @@ def load_resize_precompute_in_memory(local_file, youtube_link):
     Video_FPS = int(cap.get(cv2.CAP_PROP_FPS))
     Video_Frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # CHANGED/ADDED: skip factor calculation
+    # skip factor
     skip_factor = 1
     if User_FPS and User_FPS > 0:
         if User_FPS < Video_FPS:
             skip_factor = max(1, int(round(Video_FPS / User_FPS)))
 
-    # We'll guess how many we keep for the loading bar:
     expected_kept_frames = math.ceil(Video_Frames / skip_factor)
     load_bar = LoadingBar(expected_kept_frames, barLength=stdscr.getmaxyx()[1] - 2)
     ascii_frames = []
@@ -420,7 +426,6 @@ def load_resize_precompute_in_memory(local_file, youtube_link):
 
     success, frame = cap.read()
     while success:
-        # Display loading bar
         stdscr.move(y, x)
         stdscr.addstr(f"Frame {kept_count} / {expected_kept_frames}\n")
         load_bar.progress = kept_count
@@ -474,60 +479,90 @@ def load_resize_precompute_in_memory(local_file, youtube_link):
     stdscr.refresh()
     return (ascii_frames, kept_count)
 
+################################################################################
+# Write out metadata for caching
+################################################################################
+
+def write_cache_metadata(local_file, youtube_link, framesAmount):
+    """
+    Writes a simple metadata.txt file to 'resized/' so that
+    future -c can check the same input file, fps, etc.
+    """
+    global Video_FPS, User_FPS
+
+    if not os.path.exists("resized"):
+        os.makedirs("resized", exist_ok=True)
+
+    input_name = local_file if local_file else youtube_link
+    user_fps_str = f"{User_FPS}" if User_FPS else "None"
+
+    with open("resized/metadata.txt", "w") as f:
+        f.write(f"InputFile={input_name}\n")
+        f.write(f"OriginalFPS={Video_FPS}\n")
+        f.write(f"UsedUserFPS={user_fps_str}\n")
+        f.write(f"ResizedFrames={framesAmount}\n")
 
 ################################################################################
-# Precompute ASCII from Disk => 'resized/*.png'
+# Check cached frames
 ################################################################################
 
-def precompute_ascii_frames_from_disk(framesAmount):
+def check_cached_frames(local_file, youtube_link):
     """
-    Reads from 'resized/resized{i}.png' => convert to ASCII => returns list of frames.
+    Ensure that:
+      - 'resized/' folder exists
+      - 'resized/metadata.txt' exists
+      - The InputFile matches
+      - The previously used FPS matches the currently requested one
     """
-    global stdscr
+    global stdscr, User_FPS
 
-    stdscr.addstr("Precomputing ASCII frames from disk...\n")
-    stdscr.refresh()
-
-    term_height, term_width = stdscr.getmaxyx()
-    precomputed = []
-
-    bar = LoadingBar(framesAmount, barLength=term_width - 2)
-    y, x = stdscr.getyx()
-
-    for i in range(framesAmount):
-        stdscr.move(y, x)
-        stdscr.addstr(f"Converting frame {i}/{framesAmount-1}\n")
-
-        img_path = f"resized/resized{i}.png"
-        img = Image.open(img_path)
-        pixels = img.load()
-
-        frame_data = []
-        for row in range(img.height):
-            row_data = []
-            for col in range(img.width):
-                if ColorMode:
-                    r, g, b = pixels[col, row]
-                    color_idx = xterm_256_index(r, g, b)
-                    pair_id = get_color_pair(color_idx, color_idx)
-                    row_data.append(('█', pair_id))
-                else:
-                    val = pixels[col, row]
-                    char_idx = int(val // 25)
-                    ascii_char = chars_gray[char_idx]
-                    row_data.append(ascii_char)
-
-            frame_data.append(row_data)
-
-        precomputed.append(frame_data)
-
-        bar.progress = i
-        stdscr.addstr(bar.display() + "\n")
+    if not os.path.isdir("resized"):
+        stdscr.addstr("Error: 'resized/' directory not found. You must run with -write first.\n")
         stdscr.refresh()
+        sys.exit(1)
 
-    stdscr.addstr("Finished precomputing from disk.\n")
-    stdscr.refresh()
-    return precomputed
+    meta_path = "resized/metadata.txt"
+    if not os.path.isfile(meta_path):
+        stdscr.addstr("Error: 'resized/metadata.txt' not found. Cannot verify caching metadata.\n")
+        stdscr.refresh()
+        sys.exit(1)
+
+    # Read the metadata file
+    metadata = {}
+    with open(meta_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            key, value = line.split("=", 1)
+            metadata[key] = value
+
+    # Check input file matches
+    current_input = local_file if local_file else youtube_link
+    if "InputFile" in metadata:
+        if metadata["InputFile"] != current_input:
+            stdscr.addstr(
+                f"Warning: The cached frames were generated from '{metadata['InputFile']}', "
+                f"but you are trying to play '{current_input}'.\n"
+            )
+            stdscr.refresh()
+            # Depending on your preference, you could either proceed or exit:
+            # sys.exit(1)
+    else:
+        stdscr.addstr("Warning: No 'InputFile' in metadata.txt. Cannot verify match.\n")
+
+    # Check that if there was a used user FPS, it matches the new one:
+    if "UsedUserFPS" in metadata and metadata["UsedUserFPS"] != "None":
+        old_fps = float(metadata["UsedUserFPS"])
+        if User_FPS and abs(User_FPS - old_fps) > 1e-6:
+            stdscr.addstr(
+                f"Warning: The cached frames were extracted at {old_fps} FPS, "
+                f"but you requested {User_FPS}.\n"
+                f"This may cause desync or incorrect playback.\n"
+            )
+            stdscr.refresh()
+            # Decide if you want to allow or exit:
+            # sys.exit(1)
 
 ################################################################################
 # Video Metadata
@@ -560,13 +595,11 @@ def draw_images(framesAmount, ascii_frames, player):
 
     player.play()
 
-    # CHANGED: The effective_fps logic for playback remains as it was,
-    # because we've *already* physically skipped frames in capture if -f was used.
-    # The below skip_factor is purely for dynamic skipping if the system lags.
     effective_fps = User_FPS if User_FPS else Video_FPS
     if effective_fps <= 0:
         effective_fps = Video_FPS
 
+    # This skip_factor is for dynamic skipping if system lags
     skip_factor = max(1, int(round(Video_FPS / effective_fps)))
 
     start_time = time.time()
@@ -622,7 +655,6 @@ def draw_images(framesAmount, ascii_frames, player):
         frame_idx += skip_factor
 
     player.stop()
-
 
 ################################################################################
 # Captions
@@ -714,3 +746,4 @@ class LoadingBar:
 
 if __name__ == "__main__":
     main()
+
