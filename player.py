@@ -214,7 +214,6 @@ def main():
                 ascii_frames = precompute_ascii_frames_from_disk(total_frames)
             else:
                 # Single pass: load each frame, resize in memory, precompute ASCII, free memory
-                # => single bar
                 ascii_frames, total_frames = load_resize_precompute_in_memory(local_file, youtube_link)
                 if YT and Subtitles:
                     stdscr.addstr("Getting video captions\n")
@@ -223,8 +222,7 @@ def main():
                     stdscr.addstr("Got captions\n")
                     stdscr.refresh()
         else:
-            # -c => read from resized/*.png
-            # Must have previously run with -write
+            # -c => read from resized/*.png (already extracted => can't skip)
             stdscr.addstr("Using cached frames in 'resized/' folder.\n")
             stdscr.refresh()
 
@@ -263,7 +261,7 @@ def main():
 def get_video_frames_png(local_file, youtube_link):
     """
     Loads frames from the video, saves each as frames/frame{i}.png (lossless).
-    Two-step approach with separate function for resizing.
+    Then we do resizing separately.
     """
     global stdscr, Video_FPS, Video_Frames
 
@@ -283,29 +281,49 @@ def get_video_frames_png(local_file, youtube_link):
     Video_FPS = int(cap.get(cv2.CAP_PROP_FPS))
     Video_Frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    loading_bar = LoadingBar(Video_Frames, barLength=stdscr.getmaxyx()[1] - 2)
+    # CHANGED/ADDED: Calculate skip factor so we decode fewer frames if -f was supplied
+    skip_factor = 1
+    if User_FPS and User_FPS > 0:
+        if User_FPS < Video_FPS:
+            skip_factor = max(1, int(round(Video_FPS / User_FPS)))
+        # If User_FPS >= Video_FPS, skip_factor remains 1 (decode all frames)
+
+    # We don't know exactly how many frames we'll keep after skipping,
+    # but we can guess. For the loading bar, let's do a simple upper bound:
+    expected_kept_frames = math.ceil(Video_Frames / skip_factor)
+
+    loading_bar = LoadingBar(expected_kept_frames, barLength=stdscr.getmaxyx()[1] - 2)
 
     success, frame = cap.read()
-    count = 0
+    count = 0      # count of frames we actually keep
     y, x = curses.getsyx()
 
     while success:
-        stdscr.addstr(y, x, f"Frame {count} / {Video_Frames - 1}\n")
+        # Display progress for the frames we keep
+        stdscr.addstr(y, x, f"Frame {count} / {expected_kept_frames}\n")
         loading_bar.progress = count
         stdscr.addstr(loading_bar.display() + "\n")
         stdscr.refresh()
 
         # Save as PNG (lossless)
         cv2.imwrite(f"frames/frame{count}.png", frame, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-
-        success, frame = cap.read()
         count += 1
+
+        # Now skip skip_factor - 1 frames in the capture
+        for _ in range(skip_factor - 1):
+            # Just grab them; don't decode
+            success = cap.grab()
+            if not success:
+                break
+
+        # Attempt to read next actual decoded frame
+        success, frame = cap.read()
 
     cap.release()
 
     stdscr.addstr("\nFinished loading frames => frames/*.png\n")
     stdscr.refresh()
-    return count
+    return count  # Return how many frames we actually wrote
 
 ################################################################################
 # Resizing => resized/*.png
@@ -358,11 +376,10 @@ def resize_image_png(index):
 def load_resize_precompute_in_memory(local_file, youtube_link):
     """
     If not writing, we do a single pass:
-      1) read each frame from the video
+      1) read each frame from the video (optionally skipping)
       2) convert/resize in memory
       3) convert to ASCII
-      4) discard the frame to free memory
-    We only store the final ASCII data, not the images.
+      4) discard
     Returns (ascii_frames, total_frames).
     """
     global stdscr, Video_FPS, Video_Frames
@@ -383,7 +400,15 @@ def load_resize_precompute_in_memory(local_file, youtube_link):
     Video_FPS = int(cap.get(cv2.CAP_PROP_FPS))
     Video_Frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    load_bar = LoadingBar(Video_Frames, barLength=stdscr.getmaxyx()[1] - 2)
+    # CHANGED/ADDED: skip factor calculation
+    skip_factor = 1
+    if User_FPS and User_FPS > 0:
+        if User_FPS < Video_FPS:
+            skip_factor = max(1, int(round(Video_FPS / User_FPS)))
+
+    # We'll guess how many we keep for the loading bar:
+    expected_kept_frames = math.ceil(Video_Frames / skip_factor)
+    load_bar = LoadingBar(expected_kept_frames, barLength=stdscr.getmaxyx()[1] - 2)
     ascii_frames = []
 
     term_height, term_width = stdscr.getmaxyx()
@@ -391,30 +416,31 @@ def load_resize_precompute_in_memory(local_file, youtube_link):
     new_width = max(1, term_width)
 
     y, x = curses.getsyx()
-    count = 0
+    kept_count = 0
 
     success, frame = cap.read()
     while success:
+        # Display loading bar
         stdscr.move(y, x)
-        stdscr.addstr(f"Frame {count} / {Video_Frames - 1}\n")
-        load_bar.progress = count
+        stdscr.addstr(f"Frame {kept_count} / {expected_kept_frames}\n")
+        load_bar.progress = kept_count
         stdscr.addstr(load_bar.display() + "\n")
         stdscr.refresh()
 
-        # 1) Convert to PIL
+        # Convert to PIL
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         im_pil = Image.fromarray(frame_rgb)
 
-        # 2) Color or Gray
+        # Convert to color or grayscale
         if ColorMode:
             im_pil = im_pil.convert("RGB")
         else:
             im_pil = im_pil.convert("L")
 
-        # 3) Resize
+        # Resize
         im_pil = im_pil.resize((new_width, new_height), resample=Image.NEAREST)
 
-        # 4) Convert to ASCII immediately
+        # Convert to ASCII
         frame_data = []
         pixels = im_pil.load()
         for row in range(im_pil.height):
@@ -433,18 +459,21 @@ def load_resize_precompute_in_memory(local_file, youtube_link):
             frame_data.append(row_data)
 
         ascii_frames.append(frame_data)
+        kept_count += 1
 
-        # free memory by discarding 'frame' and 'im_pil'
-        frame = None
-        im_pil = None
+        # Skip skip_factor - 1 frames
+        for _ in range(skip_factor - 1):
+            success = cap.grab()
+            if not success:
+                break
 
         success, frame = cap.read()
-        count += 1
 
     cap.release()
     stdscr.addstr("\nFinished single-pass in-memory load+precompute.\n")
     stdscr.refresh()
-    return (ascii_frames, count)
+    return (ascii_frames, kept_count)
+
 
 ################################################################################
 # Precompute ASCII from Disk => 'resized/*.png'
@@ -531,6 +560,9 @@ def draw_images(framesAmount, ascii_frames, player):
 
     player.play()
 
+    # CHANGED: The effective_fps logic for playback remains as it was,
+    # because we've *already* physically skipped frames in capture if -f was used.
+    # The below skip_factor is purely for dynamic skipping if the system lags.
     effective_fps = User_FPS if User_FPS else Video_FPS
     if effective_fps <= 0:
         effective_fps = Video_FPS
@@ -590,6 +622,7 @@ def draw_images(framesAmount, ascii_frames, player):
         frame_idx += skip_factor
 
     player.stop()
+
 
 ################################################################################
 # Captions
