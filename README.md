@@ -58,6 +58,8 @@ Options:
   -f <fps>     Set a custom ASCII framerate (fewer frames per second).
                Audio still plays at normal speed (frames may be skipped).
   -noskip      Disable dynamic skipping (video may get out of sync).
+  -nocompute   Do not precompute frames into memory; compute and render frames live during playback.
+               This reduces memory usage at cost of performance, suitable for larger videos.
   -debug       Show live FPS (frames drawn per second) top-right.
   -color       Enable color approximation (each pixel is a colored block).
   -h, -help    Show this help message and exit.
